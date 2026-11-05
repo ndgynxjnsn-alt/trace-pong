@@ -1,0 +1,116 @@
+# trace-pong: the visualizer plus a 14-service demo shop that feeds the LGTM stack.
+#
+#   loadgen -> gateway -> ... 14 services ... -> (virtual) postgres dbs, redis, elasticsearch, 3rd-party APIs
+#       every service exports OTLP traces to Alloy -> Tempo -> metrics-generator (service graph) -> Mimir
+#   trace-pong (http://localhost:8077) reads Tempo (spans) + Mimir (service-graph metrics)
+#
+# Joins the network of the LGTM stack (../docker-compose.yml, project "graf_zahl"):
+#   (cd .. && docker compose up -d alloy tempo mimir loki grafana)
+#   docker compose up -d --build
+# Override LGTM_NETWORK / OTLP_ENDPOINT / TEMPO_URL / MIMIR_URL for a different stack.
+name: trace-pong
+
+x-mesh: &mesh
+  image: trace-pong/mesh:local
+  build: ./mesh
+  restart: unless-stopped
+  mem_limit: 128m
+  networks: [lgtm]
+  environment: &mesh-env
+    OTEL_EXPORTER_OTLP_ENDPOINT: ${OTLP_ENDPOINT:-http://alloy:4318}
+    OTEL_EXPORTER_OTLP_HEADERS: ${OTLP_HEADERS:-}
+
+services:
+  trace-pong:
+    image: trace-pong/server:local
+    build: .
+    restart: unless-stopped
+    networks: [lgtm]
+    ports: ["8077:8077"]
+    environment:
+      TEMPO_URL: ${TEMPO_URL:-http://tempo:3200}
+      MIMIR_URL: ${MIMIR_URL:-http://mimir:9009/prometheus}
+      TENANT: ${TENANT:-}
+
+  loadgen:
+    <<: *mesh
+    environment:
+      <<: *mesh-env
+      SERVICE: loadgen
+      RPS: ${RPS:-12}
+
+  gateway:
+    <<: *mesh
+    environment:
+      <<: *mesh-env
+      SERVICE: gateway
+  auth:
+    <<: *mesh
+    environment:
+      <<: *mesh-env
+      SERVICE: auth
+  catalog:
+    <<: *mesh
+    environment:
+      <<: *mesh-env
+      SERVICE: catalog
+  search:
+    <<: *mesh
+    environment:
+      <<: *mesh-env
+      SERVICE: search
+  recommendation:
+    <<: *mesh
+    environment:
+      <<: *mesh-env
+      SERVICE: recommendation
+  cart:
+    <<: *mesh
+    environment:
+      <<: *mesh-env
+      SERVICE: cart
+  pricing:
+    <<: *mesh
+    environment:
+      <<: *mesh-env
+      SERVICE: pricing
+  currency:
+    <<: *mesh
+    environment:
+      <<: *mesh-env
+      SERVICE: currency
+  checkout:
+    <<: *mesh
+    environment:
+      <<: *mesh-env
+      SERVICE: checkout
+  inventory:
+    <<: *mesh
+    environment:
+      <<: *mesh-env
+      SERVICE: inventory
+  payment:
+    <<: *mesh
+    environment:
+      <<: *mesh-env
+      SERVICE: payment
+  fraud:
+    <<: *mesh
+    environment:
+      <<: *mesh-env
+      SERVICE: fraud
+  shipping:
+    <<: *mesh
+    environment:
+      <<: *mesh-env
+      SERVICE: shipping
+  notification:
+    <<: *mesh
+    environment:
+      <<: *mesh-env
+      SERVICE: notification
+
+networks:
+  lgtm:
+    name: ${LGTM_NETWORK:-graf_zahl_default}
+    external: true
