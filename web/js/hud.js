@@ -77,9 +77,27 @@ export class Hud {
       if (er > 0.05 && n.rate > 0.05) alerts.push({ id: n.id, txt: `${(er * 100).toFixed(0)}% errors`, sev: 'err', color: n.css });
       else if (b != null && n.mean > b * 3 && n.mean > 20) alerts.push({ id: n.id, txt: `latency ${fmtMs(n.mean)} (×${(n.mean / b).toFixed(1)})`, sev: 'warn', color: n.css });
     }
+    // new anomaly -> big banner
+    const ids = new Set(alerts.map((a) => a.id + a.sev));
+    for (const a of alerts) {
+      if (!this.active?.has(a.id + a.sev) && wall - (this.bannerAt || 0) > 4000 && this.warm) this.banner(a);
+    }
+    this.active = ids;
+    this.warm = this.warm || s.nodes.size > 0 && wall > 15000;
     $('alerts').innerHTML = alerts.map((a) => `<li class="${a.sev}"><i></i><b style="color:${a.color}">${esc(a.id)}</b> ${esc(a.txt)}</li>`).join('');
 
     this.tooltip();
+  }
+
+  banner(a) {
+    this.bannerAt = performance.now();
+    const el = $('banner');
+    el.className = a.sev;
+    el.innerHTML = `<small>${a.sev === 'err' ? 'incident' : 'slowdown'}</small><b>${esc(a.id)}</b><span>${esc(a.txt)}</span>`;
+    void el.offsetWidth;   // restart the animation
+    el.classList.add('show');
+    clearTimeout(this.bannerTimer);
+    this.bannerTimer = setTimeout(() => el.classList.remove('show'), 3800);
   }
 
   tooltip() {

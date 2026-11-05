@@ -159,7 +159,7 @@ async function main() {
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);
-  window.tracePong = { scene, cam, renderer, source };
+  window.tracePong = { scene, cam, renderer, source, hud };
 }
 
 function segDist(px, py, x0, y0, x1, y1) {
