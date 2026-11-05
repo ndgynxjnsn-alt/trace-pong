@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>trace-pong · live service traffic</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='5' fill='%2300e5ff'/><rect x='3' y='6' width='3' height='20' rx='1.5' fill='%23ff2bd6'/><rect x='26' y='6' width='3' height='20' rx='1.5' fill='%2300ff9c'/></svg>">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <canvas id="gpu"></canvas>
+  <canvas id="text"></canvas>
+
+  <header id="brand">
+    <div class="logo">trace<span>·</span>pong</div>
+    <div class="clock">
+      <div id="date">&nbsp;</div>
+      <div id="time">--:--:--</div>
+    </div>
+    <div class="status">
+      <span id="live" class="pill"><i></i><b id="mode">LIVE</b> <span id="lag">…</span></span>
+      <span id="error" class="err"></span>
+    </div>
+  </header>
+
+  <aside id="panel">
+    <div class="tiles">
+      <div class="tile"><b id="t-rps">–</b><span>req/s in</span></div>
+      <div class="tile"><b id="t-hops">–</b><span>hops/s</span></div>
+      <div class="tile"><b id="t-err">–</b><span>errors</span></div>
+      <div class="tile"><b id="t-lat">–</b><span>mean latency</span></div>
+    </div>
+    <h2>Entry routes <small>last 30 s</small></h2>
+    <ul id="routes"></ul>
+    <h2 class="alerts-h">Anomalies</h2>
+    <ul id="alerts"></ul>
+  </aside>
+
+  <footer id="foot">
+    <span id="t-nodes"></span>
+    <span id="t-sample"></span>
+    <span id="fps"></span>
+    <span class="keys"><kbd>H</kbd> help</span>
+  </footer>
+
+  <div id="tip" hidden></div>
+  <div id="toast"></div>
+
+  <div id="help" hidden>
+    <h3>trace-pong</h3>
+    <p>Every ball is one call between two services, replayed from Tempo traces.
+      The request flies to the callee, a paddle swings round to meet it, and the
+      response goes back once the span and its own calls are done.
+      Errors get past the paddle and explode. Rings show health (green ok / red errors),
+      as in Grafana's service graph. Rates and latencies come from Tempo's service-graph metrics in Mimir.</p>
+    <table>
+      <tr><td><kbd>drag</kbd> <kbd>wheel</kbd></td><td>pan / zoom (double-click to re-fit)</td></tr>
+      <tr><td><kbd>click</kbd></td><td>pin focus on a service</td></tr>
+      <tr><td><kbd>space</kbd></td><td>pause</td></tr>
+      <tr><td><kbd>+</kbd> <kbd>-</kbd></td><td>ball speed</td></tr>
+      <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>latency stretch (how long balls are held)</td></tr>
+      <tr><td><kbd>B</kbd> <kbd>L</kbd> <kbd>F</kbd></td><td>bloom / labels / fit</td></tr>
+    </table>
+    <p class="hint">URL options: <code>?sim</code> runs the built-in simulator · <code>?window=5m</code> · <code>?nobloom</code></p>
+  </div>
+
+  <div id="nogpu" hidden>
+    <h1>trace-pong needs WebGPU</h1>
+    <p id="nogpu-msg"></p>
+    <p>Use a recent Chrome, Edge or Safari, or Firefox with WebGPU enabled.</p>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
