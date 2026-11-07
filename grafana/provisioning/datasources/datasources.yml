@@ -1,0 +1,26 @@
+apiVersion: 1
+
+# Multi-tenant stacks: add the tenant to both data sources, e.g.
+#   jsonData:       { httpHeaderName1: X-Scope-OrgID }
+#   secureJsonData: { httpHeaderValue1: my-tenant }
+# trace-pong goes through Grafana's data source proxy, so it uses whatever is set here.
+datasources:
+  - name: Mimir
+    uid: mimir
+    type: prometheus
+    access: proxy
+    url: ${MIMIR_URL}
+    isDefault: true
+    jsonData:
+      prometheusType: Mimir
+
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: ${TEMPO_URL}
+    jsonData:
+      serviceMap:
+        datasourceUid: mimir
+      nodeGraph:
+        enabled: true

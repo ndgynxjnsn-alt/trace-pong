@@ -21,7 +21,7 @@ export class Renderer {
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
     if (!adapter) throw new Error('No WebGPU adapter found.');
     const device = await adapter.requestDevice();
-    device.lost.then((info) => console.error('WebGPU device lost:', info.message));
+    device.lost.then((info) => { if (info.reason !== 'destroyed') console.error('WebGPU device lost:', info.message); });
     device.addEventListener?.('uncapturederror', (e) => console.error('WebGPU:', e.error.message));
     return new Renderer(device, canvas);
   }

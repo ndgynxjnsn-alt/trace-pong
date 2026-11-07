@@ -1,0 +1,18 @@
+{
+  "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
+  "type": "panel",
+  "name": "trace-pong",
+  "id": "tracepong-live-panel",
+  "skipDataQuery": true,
+  "info": {
+    "description": "Live service traffic replayed from Tempo traces on a service graph, drawn with WebGPU",
+    "author": { "name": "trace-pong" },
+    "keywords": ["tempo", "traces", "service graph", "traffic", "webgpu"],
+    "logos": { "small": "img/logo.svg", "large": "img/logo.svg" },
+    "links": [{ "name": "Source", "url": "https://github.com/ndgynxjnsn-alt/trace-pong" }],
+    "screenshots": [],
+    "version": "1.0.0",
+    "updated": "2026-11-07"
+  },
+  "dependencies": { "grafanaDependency": ">=11.0.0", "plugins": [] }
+}

@@ -1,42 +1,5 @@
-// Data sources. LiveSource talks to the trace-pong server (Tempo + Mimir);
-// SimSource fakes a shop in the browser so the visuals work without a stack (?sim).
-
-export class LiveSource {
-  constructor(scene, { window = '1m' } = {}) {
-    this.scene = scene;
-    this.window = window;
-    this.status = { graph: 'connecting', stream: 'connecting', error: null, sampled: 0, found: 0 };
-    this.label = 'LIVE';
-    this.pollGraph();
-    this.connect();
-  }
-
-  async pollGraph() {
-    try {
-      const r = await fetch(`api/graph?window=${this.window}`, { cache: 'no-store' });
-      const g = await r.json();
-      if (g.error) throw new Error(g.error);
-      this.scene.applyGraph(g);
-      this.status.graph = 'ok';
-      this.status.error = null;
-    } catch (e) {
-      this.status.graph = 'error';
-      this.status.error = `graph: ${e.message}`;
-    }
-    setTimeout(() => this.pollGraph(), 3000);
-  }
-
-  connect() {
-    const es = new EventSource('api/stream');
-    es.onopen = () => { this.status.stream = 'ok'; };
-    es.onerror = () => { this.status.stream = 'reconnecting'; };
-    es.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data);
-      if (msg.sampled !== undefined) { this.status.sampled = msg.sampled; this.status.found = msg.found; }
-      this.scene.ingest(msg.hops || [], Date.now(), !!msg.backlog);
-    };
-  }
-}
+// Simulator: fakes a shop in the browser so the visuals work without a stack.
+// Live data is in tempo.js.
 
 // ---------------------------------------------------------------------------
 // Simulator: a smaller cousin of mesh/topology.py
@@ -82,15 +45,17 @@ const pick = (mix) => {
 export class SimSource {
   constructor(scene) {
     this.scene = scene;
-    this.status = { graph: 'ok', stream: 'ok', error: null, sampled: 0, found: 0 };
-    this.label = 'SIM';
+    this.status = { error: null };
     this.log = [];         // [t, from, to, type, err, dur]
     this.incident = null;
     this.t0 = Date.now();
-    setInterval(() => this.tick(), 1000);
-    setInterval(() => this.graph(), 3000);
+    this.timers = [setInterval(() => this.tick(), 1000), setInterval(() => this.graph(), 3000)];
     this.tick(true);
     this.graph();
+  }
+
+  stop() {
+    this.timers.forEach(clearInterval);
   }
 
   // returns hops for one call into `svc`, starting at time t

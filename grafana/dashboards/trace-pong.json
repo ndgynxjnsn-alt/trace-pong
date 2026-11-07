@@ -1,0 +1,32 @@
+{
+  "uid": "trace-pong",
+  "title": "trace-pong",
+  "tags": ["tempo", "service graph"],
+  "editable": true,
+  "graphTooltip": 0,
+  "refresh": "",
+  "schemaVersion": 41,
+  "time": { "from": "now-15m", "to": "now" },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "tracepong-live-panel",
+      "title": "Live traffic",
+      "gridPos": { "h": 26, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "live",
+        "tempoUid": "tempo",
+        "traceql": "{ true }",
+        "labelFilter": "",
+        "window": "1m",
+        "maxTraces": 30,
+        "showClock": true,
+        "labels": true,
+        "bloom": true,
+        "speed": 1,
+        "stretch": 2
+      }
+    }
+  ]
+}

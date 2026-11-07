@@ -1,12 +1,11 @@
-// DOM HUD: clock, connection errors, node tooltip.
+// DOM HUD inside the panel: clock, data errors, node tooltip.
 import { fmtMs, fmtRate } from './overlay.js';
-import { css } from './scene.js';
 
-const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
 export class Hud {
-  constructor(scene, source) {
+  constructor(root, scene, source) {
+    this.$ = (cls) => root.querySelector(`.tp-${cls}`);
     this.scene = scene;
     this.source = source;
     this.last = 0;
@@ -16,6 +15,7 @@ export class Hud {
     if (wall - this.last < 200) return;
     this.last = wall;
     const s = this.scene;
+    const $ = this.$;
 
     // clock (playback time)
     if (s.play) {
@@ -23,15 +23,13 @@ export class Hud {
       $('date').textContent = d.toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
       $('time').textContent = d.toLocaleTimeString(undefined, { hour12: false }) + '.' + String(d.getMilliseconds()).padStart(3, '0').slice(0, 1);
     }
-    const st = this.source.status;
-    $('error').textContent = st.error || (st.stream !== 'ok' ? `stream ${st.stream}` : '');
-
+    $('error').textContent = this.source.status.error || '';
     this.tooltip();
   }
 
   tooltip() {
     const s = this.scene;
-    const tip = $('tip');
+    const tip = this.$('tip');
     const n = s.nodes.get(s.hover);
     if (!n) { tip.hidden = true; return; }
     tip.hidden = false;
@@ -50,5 +48,3 @@ export class Hud {
       <p class="hint">click to ${s.focus === n.id ? 'unpin' : 'pin'} focus</p>`;
   }
 }
-
-export { css };

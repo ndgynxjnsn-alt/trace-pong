@@ -1,6 +1,6 @@
 # trace-pong
 
-Live service traffic from **Grafana Tempo**, drawn with **WebGPU**: the service graph
+A **Grafana panel plugin** that shows live service traffic from **Tempo**, drawn with **WebGPU**: the service graph
 looks like Tempo's, the motion is as loud as Logstalgia's, and it shows both the topology and the
 traffic, as promviz/Vizceral do. Unlike those, every ball is a **real call from a real trace**.
 
@@ -16,32 +16,35 @@ traffic, as promviz/Vizceral do. Unlike those, every ball is a **real call from 
 * **Errors** smash into the node and explode in red sparks, and the status code flies off at the
   caller. The ring's health arc turns red.
 * Hover a service for its callers and callees with rate, latency and error rate.
+* It is an ordinary panel: add it to any dashboard, pick the Tempo data source, filter with TraceQL.
 
 ## How it works
 
 ```
- Tempo  ── /api/search (TraceQL {true}, most_recent) ──┐
-        ── /api/v2/traces/<id> ────────────────────────┤   server/tracepong.py   ── SSE  /api/stream  (hops)
- Mimir  ── traces_service_graph_* (PromQL) ────────────┘   (Python stdlib only)  ── JSON /api/graph   (topology + RED)
-                                                                                 ── static web/
- Browser: WebGPU  (HDR scene → compute-shader sparks → dual-filter bloom → ACES composite) + 2D-canvas labels + DOM HUD
+ Browser (panel)                         Grafana                       backends
+ ─────────────────────────────────────   ───────────────────────────   ─────────────────────────
+ every 1 s: TraceQL search, most recent ─┐
+ then GET /api/v2/traces/<id> (≤ N/s)   ─┼─ /api/datasources/proxy ── Tempo
+ every 3 s: PromQL traces_service_graph_*┘   (auth, tenant headers)  └ Mimir / Prometheus
 ```
 
-The browser can't call Tempo or Mimir directly: they send no CORS headers, and every browser would
-fetch every trace again. A small backend does it once for everyone:
+There is no backend of its own. The panel calls Tempo and the metrics data source through **Grafana's
+data source proxy**, so access rights, the tenant (`X-Scope-OrgID` custom header) and any other
+data source settings come from Grafana.
 
 * **Topology and stats** come from the series that Tempo's metrics-generator (service-graphs
   processor) remote-writes to Mimir: `traces_service_graph_request_total`, `…_failed_total` and
-  `…_server_seconds_{sum,count,bucket}`. These are the same numbers Grafana's service graph uses,
+  `…_server_seconds_{sum,count}`. These are the same numbers Grafana's service graph uses,
   including virtual nodes for uninstrumented databases and APIs (`peer.service`, `db.name`, `db.system`)
   and the `user` node for roots.
-* **Traffic** comes from Tempo traces. Each second the server searches for the most recent traces, fetches
-  the new ones by ID (up to `MAX_TRACES` per poll), and pairs spans the way the service-graph processor
-  does: SERVER/CONSUMER span + parent CLIENT/PRODUCER span in another service, or a CLIENT span with
-  no child and a peer attribute. The resulting hops (`from`, `to`, start, duration, status, trace id)
-  stream to all browsers over Server-Sent Events.
-* The browser replays hops on a clock running a few seconds behind real time. The delay adapts to how
-  late hops arrive. The clock top left shows playback time.
+* **Traffic** comes from Tempo traces. Each second the panel searches for the most recent traces matching
+  the TraceQL filter, fetches the new ones by ID (up to *Traces per second*), and pairs spans the way the
+  service-graph processor does: SERVER/CONSUMER span + parent CLIENT/PRODUCER span in another service, or a
+  CLIENT span with no child and a peer attribute.
+* Hops replay on a clock running a few seconds behind real time (about 15 s with the Tempo setting below);
+  the delay adapts to how late traces arrive. The clock top left shows playback time.
+
+Each viewer polls on its own, so *Traces per second* × viewers is the load on Tempo.
 
 ### Rendering
 
@@ -56,7 +59,9 @@ additive light. The passes are:
 6. composite: ACES tonemap, slight chromatic aberration, vignette, film grain.
 
 Text (labels, status codes, span names) is a 2D canvas on top, and the HUD is plain DOM. There is no build
-step and no dependencies: ES modules plus WGSL.
+step and no dependencies: `plugin/module.js` is a hand-written AMD module (the format Grafana loads
+plugins in) that defines the panel and its options with React from Grafana, and lazily imports the
+renderer, which is native ES modules plus WGSL under `plugin/js/`.
 
 ### Prior art this borrows from
 
@@ -69,45 +74,73 @@ step and no dependencies: ES modules plus WGSL.
 * **Grafana's service graph / Node Graph** (Tempo): nodes as rings with a success/error arc and
   `ms/r · r/s` inside, plus a hover table of edges. trace-pong copies that information design.
 
-## Run it
+## Install
 
-You need Docker and a browser with WebGPU (Chrome/Edge 113+, Safari 26, or Firefox with WebGPU).
+The plugin is unsigned, so Grafana must be told to load it:
 
 ```bash
-# 1. the LGTM stack (the repo one level up, single node). Grafana is optional.
-(cd .. && docker compose up -d alloy tempo mimir loki)
-
-# 2. the demo shop (14 services + load generator) and trace-pong
-docker compose up -d --build
-
-open http://localhost:8077          # or http://localhost:8077/?sim for the built-in simulator
+python3 scripts/package.py            # -> dist/tracepong-live-panel-1.0.0.zip
 ```
 
-To develop without Docker, run `TEMPO_URL=http://localhost:3200 MIMIR_URL=http://localhost:9009/prometheus python3 server/tracepong.py`.
+* **Any Grafana ≥ 11** (tested with 13.1): unzip into the plugin folder and allow the unsigned plugin:
+  ```bash
+  unzip dist/tracepong-live-panel-*.zip -d /var/lib/grafana/plugins
+  GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=tracepong-live-panel
+  ```
+* **Docker, mounting the ZIP**: Grafana only installs ZIPs from http(s) URLs, so this repo's compose
+  mounts `dist/` and wraps the entrypoint with [grafana/install-plugins.sh](grafana/install-plugins.sh),
+  which unpacks every mounted ZIP before starting Grafana. Copy the `grafana` service from
+  [docker-compose.yml](docker-compose.yml).
+* **From a URL** (e.g. a release asset):
+  `GF_PLUGINS_PREINSTALL_SYNC=tracepong-live-panel@1.0.0@https://…/tracepong-live-panel-1.0.0.zip`.
 
-| Env | Default | |
+Then add a visualization of type **trace-pong** to a dashboard. The panel title is the title.
+
+### Panel options
+
+| Option | Default | |
 |---|---|---|
-| `TEMPO_URL` | `http://localhost:3200` | Tempo HTTP API |
-| `MIMIR_URL` | `http://localhost:9009/prometheus` | Prometheus API root (Mimir, Prometheus, …) |
-| `TENANT` | – | sent as `X-Scope-OrgID` (multi-tenant clusters) |
-| `LAG` | `4` | seconds a trace must be finished before it is fetched |
-| `MAX_TRACES` | `60` | traces fetched per poll |
-| `POLL` | `1` | seconds between polls |
-| `TITLE` | `trace-pong` | title shown top left and in the browser tab |
+| Data | Live (Tempo) | or *Simulator*: a built-in fake shop, no data sources needed |
+| Tempo data source | first Tempo data source | traces are replayed from here |
+| Service graph metrics data source | the Tempo data source's *service map* data source | Mimir/Prometheus with `traces_service_graph_*` |
+| TraceQL filter | `{ true }` | which traces to replay, e.g. `{ resource.deployment.environment = "prod" }` |
+| Service graph label filter | – | PromQL matchers for the topology, e.g. `cluster="prod"` |
+| Rate window | `1m` | for rates and latencies |
+| Traces per second | 30 | upper bound fetched from Tempo, per viewer |
+| Show playback clock, Labels, Bloom | on | |
+| Ball speed, Latency stretch | 1, 2 | also on the keyboard |
+
+Both filters accept dashboard variables. The TraceQL filter picks which balls fly; the label filter picks
+the nodes and edges.
 
 **Tempo setting.** By default, Tempo 3's query-frontend hides the newest 30 s from search
-(`query_frontend.query_end_cutoff: 30s`). For near-live playback, the stack's
-`tempo-config.yml` sets this to `2s`. With the default, trace-pong still works, but runs about 35 s behind.
-
-Tempo's metrics-generator must have the `service-graphs` processor enabled and remote-write to the
-Mimir that trace-pong reads.
+(`query_frontend.query_end_cutoff: 30s`). For near-live playback, set it to `2s`; with the default the
+panel still works but runs about 35 s behind. Tempo's metrics-generator must have the `service-graphs`
+processor enabled and remote-write to the metrics data source.
 
 ### Controls
 
-Drag to pan, wheel to zoom, double-click to re-fit. Click a service to pin focus. <kbd>space</kbd>
-pauses, <kbd>+</kbd>/<kbd>-</kbd> change ball speed, <kbd>[</kbd>/<kbd>]</kbd> change latency stretch
-(how long balls stay inside a service), and <kbd>B</kbd>/<kbd>L</kbd>/<kbd>F</kbd> toggle bloom and labels or re-fit. <kbd>H</kbd> shows help.
-URL options: `?sim`, `?window=5m` (rate window), `?nobloom`.
+Drag to pan, <kbd>ctrl</kbd>+wheel (or pinch) to zoom, double-click to re-fit. Plain wheel scrolls the
+dashboard. Click a service to pin focus. Keys work while the panel has focus: <kbd>space</kbd> pauses,
+<kbd>+</kbd>/<kbd>-</kbd> change ball speed, <kbd>[</kbd>/<kbd>]</kbd> change latency stretch (how long balls
+stay inside a service), <kbd>B</kbd>/<kbd>L</kbd>/<kbd>F</kbd> toggle bloom and labels or re-fit, and
+<kbd>H</kbd> shows help.
+
+## Run the demo
+
+```bash
+# 1. the LGTM stack (the repo one level up, single node); its own Grafana is not needed
+(cd .. && docker compose up -d alloy tempo mimir loki)
+
+# 2. the plugin ZIP, the demo shop (14 services + load generator) and a Grafana with the panel
+python3 scripts/package.py
+docker compose up -d --build
+
+open http://localhost:3001            # the trace-pong dashboard is the home page
+```
+
+After changing `plugin/`, run `python3 scripts/package.py && docker compose restart grafana` and reload.
+`GRAFANA_PORT`, `TEMPO_URL`, `MIMIR_URL`, `LGTM_NETWORK` and `OTLP_ENDPOINT` adapt the compose to another stack.
 
 ## The demo shop (`mesh/`)
 

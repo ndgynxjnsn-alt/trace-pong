@@ -1,13 +1,13 @@
-# trace-pong: the visualizer plus a 14-service demo shop that feeds the LGTM stack.
+# trace-pong demo: Grafana with the trace-pong panel, plus a 14-service demo shop that feeds the LGTM stack.
 #
 #   loadgen -> gateway -> ... 14 services ... -> (virtual) postgres dbs, redis, elasticsearch, 3rd-party APIs
 #       every service exports OTLP traces to Alloy -> Tempo -> metrics-generator (service graph) -> Mimir
-#   trace-pong (http://localhost:8077) reads Tempo (spans) + Mimir (service-graph metrics)
+#   Grafana (http://localhost:3001) runs the panel, which reads Tempo + Mimir through the data source proxy
 #
 # Joins the network of the LGTM stack (../docker-compose.yml, project "graf_zahl"):
-#   (cd .. && docker compose up -d alloy tempo mimir loki grafana)
-#   docker compose up -d --build
-# Override LGTM_NETWORK / OTLP_ENDPOINT / TEMPO_URL / MIMIR_URL for a different stack.
+#   (cd .. && docker compose up -d alloy tempo mimir loki)
+#   python3 scripts/package.py && docker compose up -d --build
+# Override LGTM_NETWORK / OTLP_ENDPOINT / TEMPO_URL / MIMIR_URL / GRAFANA_PORT for a different stack.
 name: trace-pong
 
 x-mesh: &mesh
@@ -21,17 +21,26 @@ x-mesh: &mesh
     OTEL_EXPORTER_OTLP_HEADERS: ${OTLP_HEADERS:-}
 
 services:
-  trace-pong:
-    image: trace-pong/server:local
-    build: .
+  # Grafana with the trace-pong panel: the ZIP from dist/ is unpacked into the plugin folder on start.
+  grafana:
+    image: grafana/grafana:13.1.0
     restart: unless-stopped
     networks: [lgtm]
-    ports: ["8077:8077"]
+    ports: ["${GRAFANA_PORT:-3001}:3000"]
+    entrypoint: ["/install-plugins.sh"]
     environment:
+      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: tracepong-live-panel
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/trace-pong.json
       TEMPO_URL: ${TEMPO_URL:-http://tempo:3200}
       MIMIR_URL: ${MIMIR_URL:-http://mimir:9009/prometheus}
-      TENANT: ${TENANT:-}
-      TITLE: ${TITLE:-trace-pong}
+    volumes:
+      - ./dist:/plugin-zips:ro
+      - ./grafana/install-plugins.sh:/install-plugins.sh:ro
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
 
   loadgen:
     <<: *mesh

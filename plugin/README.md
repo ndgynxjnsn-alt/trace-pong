@@ -1,0 +1,25 @@
+# trace-pong
+
+Live service traffic replayed from Tempo traces on a service graph, drawn with WebGPU.
+
+Every ball is one real call between two services from a recent trace. The request flies to the callee,
+and the response returns once the span and its own calls are done. Errors explode in red. Nodes look
+like Grafana's service graph: a health ring with mean latency and request rate inside.
+
+## Requirements
+
+* A browser with WebGPU (Chrome/Edge, Safari 26, Firefox with WebGPU enabled).
+* A Tempo data source, with Tempo's metrics-generator `service-graphs` processor writing
+  `traces_service_graph_*` series to a Prometheus/Mimir data source.
+
+## Options
+
+* **Tempo data source** and **Service graph metrics data source**. Empty means the first Tempo data source
+  and its *service map* data source. All requests go through Grafana's data source proxy, so tenant
+  headers and auth come from the data source settings.
+* **TraceQL filter** picks the traces to replay. **Service graph label filter** (PromQL matchers) picks
+  the topology. Both accept dashboard variables.
+* **Traces per second**: the upper bound fetched from Tempo per viewer.
+* **Simulator** mode needs no data sources.
+
+Drag to pan, ctrl+wheel to zoom, click to focus a service, and press `H` in the panel for keys.
