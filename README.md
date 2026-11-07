@@ -79,7 +79,7 @@ renderer, which is native ES modules plus WGSL under `plugin/js/`.
 The plugin is unsigned, so Grafana must be told to load it:
 
 ```bash
-python3 scripts/package.py            # -> dist/tracepong-live-panel-1.0.0.zip
+python3 scripts/package.py            # -> dist/tracepong-live-panel-1.1.0.zip
 ```
 
 * **Any Grafana ≥ 11** (tested with 13.1): unzip into the plugin folder and allow the unsigned plugin:
@@ -92,7 +92,7 @@ python3 scripts/package.py            # -> dist/tracepong-live-panel-1.0.0.zip
   which unpacks every mounted ZIP before starting Grafana. Copy the `grafana` service from
   [docker-compose.yml](docker-compose.yml).
 * **From a URL** (e.g. a release asset):
-  `GF_PLUGINS_PREINSTALL_SYNC=tracepong-live-panel@1.0.0@https://…/tracepong-live-panel-1.0.0.zip`.
+  `GF_PLUGINS_PREINSTALL_SYNC=tracepong-live-panel@1.1.0@https://…/tracepong-live-panel-1.1.0.zip`.
 
 Then add a visualization of type **trace-pong** to a dashboard. The panel title is the title.
 
@@ -120,8 +120,10 @@ processor enabled and remote-write to the metrics data source.
 
 ### Controls
 
-Drag to pan, <kbd>ctrl</kbd>+wheel (or pinch) to zoom, double-click to re-fit. Plain wheel scrolls the
-dashboard. Click a service to pin focus. Keys work while the panel has focus: <kbd>space</kbd> pauses,
+Drag to pan, wheel to zoom, double-click to re-fit. The wheel zooms once you have clicked the panel, in
+full screen, or with <kbd>ctrl</kbd> held (and trackpad pinch); otherwise it scrolls the dashboard. The buttons
+top right zoom, re-fit and switch to **full screen** (also <kbd>Shift</kbd>+<kbd>F</kbd>; <kbd>Esc</kbd> leaves).
+Click a service to pin focus. Keys work while the panel has focus: <kbd>space</kbd> pauses,
 <kbd>+</kbd>/<kbd>-</kbd> change ball speed, <kbd>[</kbd>/<kbd>]</kbd> change latency stretch (how long balls
 stay inside a service), <kbd>B</kbd>/<kbd>L</kbd>/<kbd>F</kbd> toggle bloom and labels or re-fit, and
 <kbd>H</kbd> shows help.

@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
-"""Pack plugin/ into dist/<id>-<version>.zip (the layout Grafana expects: <id>/plugin.json, ...)."""
+"""Pack plugin/ into dist/<id>-<version>.zip (the layout Grafana expects: <id>/plugin.json, ...).
+
+Grafana serves plugin files with a one-hour cache, so relative ES-module imports get ?v=<version>
+appended in the ZIP; module.js already loads js/app.js with it.
+"""
 import json
+import re
 import pathlib
 import zipfile
 
@@ -15,6 +20,12 @@ for old in dist.glob(f"{pid}-*.zip"):
 out = dist / f"{pid}-{ver}.zip"
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
     for f in sorted(src.rglob("*")):
-        if f.is_file() and not f.name.startswith("."):
-            z.write(f, f"{pid}/{f.relative_to(src)}")
+        if not f.is_file() or f.name.startswith("."):
+            continue
+        name = f"{pid}/{f.relative_to(src)}"
+        if f.parent.name == "js" and f.suffix == ".js":
+            code = re.sub(r"""(from\s+['"]\./[\w.-]+\.js)(['"])""", rf"\1?v={ver}\2", f.read_text())
+            z.writestr(name, code)
+        else:
+            z.write(f, name)
 print(out.relative_to(root))

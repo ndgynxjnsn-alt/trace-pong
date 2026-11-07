@@ -13,6 +13,12 @@ const HTML = `
   <canvas class="tp-gpu"></canvas>
   <canvas class="tp-text"></canvas>
   <div class="tp-clock"><div class="tp-date">&nbsp;</div><div class="tp-time">--:--:--</div></div>
+  <div class="tp-tools">
+    <button data-act="in" title="Zoom in (wheel while the panel is active)">+</button>
+    <button data-act="out" title="Zoom out">&minus;</button>
+    <button data-act="fit" title="Fit (F, or double-click)"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="3" width="10" height="10" rx="2"/><circle cx="8" cy="8" r="1.5" fill="currentColor"/></svg></button>
+    <button data-act="full" title="Full screen (Shift+F)"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"/></svg></button>
+  </div>
   <div class="tp-error"></div>
   <div class="tp-foot"><span class="tp-fps"></span><span><kbd>H</kbd> help</span></div>
   <div class="tp-tip" hidden></div>
@@ -24,7 +30,8 @@ const HTML = `
       explode. Rings show health (green ok / red errors), as in Grafana's service graph. Rates and
       latencies come from Tempo's service-graph metrics.</p>
     <table>
-      <tr><td><kbd>drag</kbd> <kbd>ctrl</kbd>+<kbd>wheel</kbd></td><td>pan / zoom (double-click to re-fit)</td></tr>
+      <tr><td><kbd>drag</kbd> <kbd>wheel</kbd></td><td>pan / zoom (double-click to re-fit). Wheel zooms once you clicked the panel, in full screen, or with <kbd>ctrl</kbd></td></tr>
+      <tr><td><kbd>Shift</kbd>+<kbd>F</kbd></td><td>full screen</td></tr>
       <tr><td><kbd>click</kbd></td><td>pin focus on a service</td></tr>
       <tr><td><kbd>space</kbd></td><td>pause</td></tr>
       <tr><td><kbd>+</kbd> <kbd>-</kbd></td><td>ball speed</td></tr>
@@ -47,7 +54,15 @@ const CSS = `
 .tp-root .tp-date { color: var(--tp-dim); font-size: 11px; letter-spacing: 0.3px; }
 .tp-root .tp-time { font: 600 18px/1.1 var(--tp-mono); color: #f4f7fc; text-shadow: 0 0 14px rgba(120, 180, 255, 0.35); }
 .tp-root.tp-noclock .tp-clock { display: none; }
-.tp-root .tp-error { position: absolute; top: 10px; right: 14px; max-width: 60%; text-align: right; color: var(--tp-bad);
+.tp-root .tp-tools { position: absolute; top: 10px; right: 12px; display: flex; gap: 4px; z-index: 4; opacity: 0.55; transition: opacity 0.2s; }
+.tp-root:hover .tp-tools, .tp-root:focus .tp-tools, .tp-root:fullscreen .tp-tools { opacity: 1; }
+.tp-root .tp-tools button { width: 28px; height: 28px; display: grid; place-items: center; padding: 0; cursor: pointer;
+  border-radius: 7px; border: 1px solid rgba(255,255,255,0.12); background: rgba(16, 18, 28, 0.75); color: #dfe6f2;
+  font: 600 16px/1 var(--tp-mono); }
+.tp-root .tp-tools button:hover { background: rgba(40, 46, 66, 0.9); border-color: rgba(0, 229, 255, 0.5); color: #fff; }
+.tp-root:focus { box-shadow: inset 0 0 0 1px rgba(0, 229, 255, 0.25); }
+.tp-root:fullscreen { box-shadow: none; }
+.tp-root .tp-error { position: absolute; top: 46px; right: 14px; max-width: 60%; text-align: right; color: var(--tp-bad);
   font: 11px var(--tp-mono); pointer-events: none; text-shadow: 0 0 6px #000; }
 .tp-root .tp-foot { position: absolute; left: 14px; bottom: 8px; display: flex; gap: 14px; color: var(--tp-dim);
   font: 11px var(--tp-mono); pointer-events: none; }
@@ -185,6 +200,14 @@ export async function createTracePong(container, env, options) {
   };
 
   // ---- input -------------------------------------------------------------------
+  let toastTimer;
+  const toast = (msg) => {
+    const t = $('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove('show'), 1200);
+  };
   const text = $('text');
   const tip = $('tip');
   let drag = null, moved = false;
@@ -215,18 +238,40 @@ export async function createTracePong(container, env, options) {
     drag = null;
   });
   on(text, 'pointerleave', () => { scene.hover = null; scene.hoverEdge = null; });
-  // Plain wheel scrolls the dashboard; ctrl/cmd+wheel (and trackpad pinch) zooms.
-  on(text, 'wheel', (e) => {
-    if (!e.ctrlKey && !e.metaKey) return;
-    e.preventDefault();
+  const zoomAt = (factor, px = W / 2, py = H / 2) => {
     cam.auto = false;
-    const [px, py] = local(e);
     const [wx, wy] = toWorld(px, py);
-    cam.zoom = Math.max(0.1, Math.min(4, cam.zoom * Math.exp(-e.deltaY * 0.0015)));
+    cam.zoom = Math.max(0.1, Math.min(4, cam.zoom * factor));
     cam.x = wx - (px - W / 2) / cam.zoom;
     cam.y = wy - (py - H / 2) / cam.zoom;
+  };
+  // The wheel zooms once the panel is active (clicked), in full screen, or with ctrl/cmd (and trackpad
+  // pinch). Otherwise it scrolls the dashboard as usual, with a hint.
+  let hintAt = 0;
+  on(text, 'wheel', (e) => {
+    const active = root.contains(document.activeElement) || document.fullscreenElement === root;
+    if (!active && !e.ctrlKey && !e.metaKey) {
+      if (performance.now() - hintAt > 4000) { hintAt = performance.now(); toast('click the panel (or hold ctrl) to zoom'); }
+      return;
+    }
+    e.preventDefault();
+    const [px, py] = local(e);
+    zoomAt(Math.exp(-e.deltaY * 0.0015), px, py);
   }, { passive: false });
   on(text, 'dblclick', () => { cam.auto = true; });
+
+  const toggleFull = () => {
+    if (document.fullscreenElement === root) document.exitFullscreen?.();
+    else root.requestFullscreen?.().then(() => root.focus({ preventScroll: true })).catch((err) => toast(`full screen not allowed: ${err.message}`));
+  };
+  on($('tools'), 'click', (e) => {
+    const act = e.target.closest('button')?.dataset.act;
+    if (act === 'in') zoomAt(1.25);
+    else if (act === 'out') zoomAt(0.8);
+    else if (act === 'fit') cam.auto = true;
+    else if (act === 'full') toggleFull();
+  });
+  on($('tools'), 'dblclick', (e) => e.stopPropagation());
 
   const pick = (px, py) => {
     const [wx, wy] = toWorld(px, py);
@@ -250,14 +295,6 @@ export async function createTracePong(container, env, options) {
   };
 
   const help = $('help');
-  let toastTimer;
-  const toast = (msg) => {
-    const t = $('toast');
-    t.textContent = msg;
-    t.classList.add('show');
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => t.classList.remove('show'), 1200);
-  };
   // Keys only while the panel has focus, and never leak to Grafana's own shortcuts.
   on(root, 'keydown', (e) => {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -266,6 +303,7 @@ export async function createTracePong(container, env, options) {
       case 'b': renderer.bloomOn = !renderer.bloomOn; break;
       case 'l': overlay.labels = !overlay.labels; break;
       case 'f': cam.auto = true; break;
+      case 'F': toggleFull(); break;
       case '+': case '=': scene.speed = Math.min(4, scene.speed * 1.25); toast(`ball speed ×${scene.speed.toFixed(2)}`); break;
       case '-': scene.speed = Math.max(0.25, scene.speed / 1.25); toast(`ball speed ×${scene.speed.toFixed(2)}`); break;
       case ']': scene.stretch = Math.min(50, scene.stretch * 1.5); toast(`latency stretch ×${scene.stretch.toFixed(1)}`); break;
