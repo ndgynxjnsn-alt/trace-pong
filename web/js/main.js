@@ -38,7 +38,7 @@ async function main() {
   const fit = (k) => {
     const b = scene.bounds();
     if (!b) return;
-    const panel = W > 1100 ? 330 : 20, top = 120, bottom = 70;
+    const panel = 20, top = 100, bottom = 50;
     const aw = W - panel - 60, ah = H - top - bottom;
     const zoom = Math.max(0.25, Math.min(1.5, Math.min(aw / (b.x1 - b.x0), ah / (b.y1 - b.y0))));
     const cx = (b.x0 + b.x1) / 2 + (panel - 20) / 2 / zoom;
@@ -111,7 +111,7 @@ async function main() {
   window.addEventListener('keydown', (e) => {
     if (e.target.tagName === 'INPUT') return;
     switch (e.key) {
-      case ' ': scene.paused = !scene.paused; e.preventDefault(); break;
+      case ' ': scene.paused = !scene.paused; toast(scene.paused ? 'paused' : 'playing'); e.preventDefault(); break;
       case 'b': renderer.bloomOn = !renderer.bloomOn; break;
       case 'l': overlay.labels = !overlay.labels; break;
       case 'f': cam.auto = true; break;

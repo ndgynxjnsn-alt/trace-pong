@@ -153,7 +153,7 @@ export class Scene {
       n = {
         id, kind, x: 0, y: 0, tx: 0, ty: 0, placed: false,
         r: 26, tr: 26, rgb, lin: rgb.map(toLin), css: css(rgb),
-        pulse: 0, heat: 0, flash: 0, paddle: Math.PI * 1.5, paddleTarget: Math.PI * 1.5, paddleUrgency: 0,
+        pulse: 0, heat: 0, flash: 0,
         rate: 0, errRate: 0, mean: null, p90: null, outRate: 0, alpha: 0, lastSeen: performance.now(),
         inflight: 0, hits: 0, errs: 0,
       };
@@ -241,7 +241,7 @@ export class Scene {
     // initial order: databases first, then externals, then by name
     for (const c of cols) c.sort((a, b) => (KIND[this.nodes.get(a).kind] - KIND[this.nodes.get(b).kind]) || a.localeCompare(b));
 
-    const ROW = 136, COL = 340;
+    const ROW = 204, COL = 340;
     const ys = new Map();
     const place = () => cols.forEach((c) => c.forEach((id, i) => ys.set(id, (i - (c.length - 1) / 2) * ROW)));
     place();
@@ -380,10 +380,10 @@ export class Scene {
     n.heat = Math.min(n.heat + 0.05, 4);
     n.pulse = Math.min(n.pulse + 0.25, 0.9);
     n.inflight++;
-    const ang = from ? Math.atan2(from.x - n.x, -(from.y - n.y)) : n.paddle;
+    const ang = from ? Math.atan2(from.x - n.x, -(from.y - n.y)) : Math.PI * 1.5;
     const inDir = from ? Math.atan2(n.y - from.y, n.x - from.x) : 0;
     if (b.err) {
-      // the paddle misses: ball smashes into the node
+      // errors smash into the node
       n.errs++;
       n.flash = 0;
       this.burst(n.x, n.y, 70, RED, 420, 0.9, 2.6);
@@ -392,9 +392,8 @@ export class Scene {
       n.shake = 1;
     } else {
       n.flash = 1;
-      n.paddle = ang;
-      // sparks fly back off the paddle
-      const px = n.x + Math.sin(ang) * (n.r + 9), py = n.y - Math.cos(ang) * (n.r + 9);
+      // sparks fly back off the ring where the ball hit
+      const px = n.x + Math.sin(ang) * n.r, py = n.y - Math.cos(ang) * n.r;
       this.burst(px, py, b.slow ? 12 : 4, from ? from.lin : n.lin, 160, 0.4, 1.4, inDir + Math.PI, 1.6);
       // shockwaves are throttled per node so busy nodes don't white out
       if (this.time - (n.lastRing || 0) > 0.35 || b.slow) {
@@ -441,7 +440,7 @@ export class Scene {
     else if (this.paused && this.delay !== null) this.delay = wall - this.play;
     if (this.layoutDirty) this.layout();
 
-    // nodes: animate toward layout, decay effects, chase the paddle
+    // nodes: animate toward layout, decay effects
     const k = 1 - Math.exp(-dt * 4);
     for (const n of this.nodes.values()) {
       n.x += (n.tx - n.x) * k;
@@ -454,7 +453,6 @@ export class Scene {
       n.flash *= Math.exp(-dt * 7);
       n.heat *= Math.exp(-dt * 0.9);
       n.shake = (n.shake || 0) * Math.exp(-dt * 8);
-      n.paddleUrgency = 0;
     }
     for (const e of this.edges.values()) {
       const a = this.nodes.get(e.s), b = this.nodes.get(e.t);
@@ -481,27 +479,8 @@ export class Scene {
       if (b.phase === 1 && play >= b.ret) { b.phase = 2; }
       if (b.phase === 2 && play >= b.back) { this.onReturn(b); continue; }
       alive.push(b);
-      // the paddle of the node the ball is heading to turns to meet it
-      const goingIn = b.phase === 0;
-      const u = goingIn ? (play - b.depart) / (b.arrive - b.depart) : b.phase === 2 ? (play - b.ret) / (b.back - b.ret) : 0;
-      if (b.phase !== 1 && u > 0.35) {
-        const dst = this.nodes.get(goingIn ? b.hop.to : b.hop.f);
-        const src = this.nodes.get(goingIn ? b.hop.f : b.hop.to);
-        if (dst && src && u > dst.paddleUrgency) {
-          dst.paddleUrgency = u;
-          let a = Math.atan2(src.x - dst.x, -(src.y - dst.y));
-          if (goingIn && b.err) a += 1.1;   // ... and misses the errors
-          dst.paddleTarget = a;
-        }
-      }
     }
     this.balls = alive;
-    for (const n of this.nodes.values()) {
-      let d = n.paddleTarget - n.paddle;
-      d = Math.atan2(Math.sin(d), Math.cos(d));
-      n.paddle += d * Math.min(1, dt * (6 + 14 * n.paddleUrgency));
-    }
-
     for (const r of this.rings) r.age += dt;
     this.rings = this.rings.filter((r) => r.age < r.life);
     for (const t of this.texts) { t.age += dt; t.y += t.vy * dt; }
@@ -600,7 +579,7 @@ export class Scene {
       const heat = 1 - Math.exp(-n.heat * 0.45);
       const sx = (Math.random() - 0.5) * (n.shake || 0) * 6, sy = (Math.random() - 0.5) * (n.shake || 0) * 6;
       o.nodes.push(n.x + sx, n.y + sy, n.r, n.pulse, n.lin[0], n.lin[1], n.lin[2], err,
-        n.paddle, heat, KIND[n.kind] ?? 0, n.alpha * dimOf(n.id),
+        0, heat, KIND[n.kind] ?? 0, n.alpha * dimOf(n.id),
         n.flash, n.id === focusId ? 1 : 0, 0, 0);
       if (heat > 0.02) o.heat.push(n.x, n.y, n.r * 2.6, 0.022 * heat * dimOf(n.id), n.lin[0], n.lin[1], n.lin[2], 0);
     }

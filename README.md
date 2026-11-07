@@ -10,13 +10,12 @@ traffic, as promviz/Vizceral do. Unlike those, every ball is a **real call from 
   latency and request rate inside. Databases are blue, third-party APIs are purple and dashed,
   and incoming users are on the far left. Busy nodes heat up and glow.
 * **Balls** are hops (one client→server call) taken from fresh Tempo traces. The request flies to the
-  callee, which swings its **paddle** round to meet it. The ball stays inside (orbiting) for the span's
+  callee and bounces off its ring in a spray of sparks. The ball stays inside (orbiting) for the span's
   duration and its own downstream calls, then **bounces back** as the response. Each trace replays as a
   causal rally: a downstream call only leaves once the ball that caused it has arrived.
-* **Errors** get past the paddle and explode in red sparks, and the status code flies off at the
-  caller. Rings turn red, and the panel lists anomalies (error rate, or latency well above a
-  service's own baseline).
-* **Right panel**: entry routes over the last 30 s, a nod to Logstalgia's URL list, plus live tiles.
+* **Errors** smash into the node and explode in red sparks, and the status code flies off at the
+  caller. The ring's health arc turns red.
+* Hover a service for its callers and callees with rate, latency and error rate.
 
 ## How it works
 
@@ -42,7 +41,7 @@ fetch every trace again. A small backend does it once for everyone:
   no child and a peer attribute. The resulting hops (`from`, `to`, start, duration, status, trace id)
   stream to all browsers over Server-Sent Events.
 * The browser replays hops on a clock running a few seconds behind real time. The delay adapts to how
-  late hops arrive; the HUD shows it as `LIVE −Ns`.
+  late hops arrive. The clock top left shows playback time.
 
 ### Rendering
 
@@ -50,8 +49,8 @@ Everything is drawn into an `rgba16float` HDR target with premultiplied blending
 additive light. The passes are:
 
 1. background: a drifting fbm nebula, a world-space dot grid, and heat glows behind busy nodes;
-2. edges: tessellated Bézier curves with dashes flowing toward the callee, brighter with more traffic and redder with more errors;
-3. balls with comet trails (instanced sprites), then nodes (SDF rings, health arc, paddle, halo);
+2. edges: tessellated Bézier curves with a soft glow, brighter with more traffic and redder with more errors;
+3. balls with comet trails (instanced sprites), then nodes (SDF rings, health arc, load ring, halo);
 4. sparks: a 32k-particle ring buffer in a storage buffer, integrated by a compute shader each frame and drawn as velocity-stretched streaks;
 5. bloom: 6-level dual-filter (Kawase) down/up chain with soft threshold;
 6. composite: ACES tonemap, slight chromatic aberration, vignette, film grain.
@@ -63,8 +62,7 @@ step and no dependencies: ES modules plus WGSL.
 
 * **Logstalgia** (C++/OpenGL/SDL): Pong on web-server logs. Each request is a ball flying from the
   client column towards a paddle by the URL list, with bloom, response codes popping up and
-  misses for errors. trace-pong keeps the paddles, the balls, the glow and the scrolling list, and maps
-  them onto a service graph.
+  misses for errors. trace-pong keeps the balls, the glow and the bursts, and maps them onto a service graph.
 * **Vizceral / promviz** (three.js/WebGL): a left-to-right layered service graph with particles
   emitted along edges at a rate proportional to RPS, where red particles are errors. The particles are
   synthetic, sampled from rates. trace-pong uses the same layered layout but replays real calls.
@@ -95,6 +93,7 @@ To develop without Docker, run `TEMPO_URL=http://localhost:3200 MIMIR_URL=http:/
 | `LAG` | `4` | seconds a trace must be finished before it is fetched |
 | `MAX_TRACES` | `60` | traces fetched per poll |
 | `POLL` | `1` | seconds between polls |
+| `TITLE` | `trace-pong` | title shown top left and in the browser tab |
 
 **Tempo setting.** By default, Tempo 3's query-frontend hides the newest 30 s from search
 (`query_frontend.query_end_cutoff: 30s`). For near-live playback, the stack's

@@ -16,6 +16,7 @@ Env: TEMPO_URL, MIMIR_URL (Prometheus API root), TENANT (X-Scope-OrgID, optional
      MAX_TRACES (per poll, default 60), POLL (seconds, default 1).
 """
 import base64
+import html
 import json
 import os
 import queue
@@ -34,6 +35,7 @@ PORT = int(os.environ.get("PORT", "8077"))
 LAG = float(os.environ.get("LAG", "4"))
 MAX_TRACES = int(os.environ.get("MAX_TRACES", "60"))
 POLL = float(os.environ.get("POLL", "1"))
+TITLE = os.environ.get("TITLE", "trace-pong")
 WEB_DIR = os.environ.get("WEB_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "web"))
 
 # Same precedence as Tempo's service-graph processor for virtual (uninstrumented) servers.
@@ -333,6 +335,15 @@ class Handler(SimpleHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def send_index(self):
+        with open(os.path.join(WEB_DIR, "index.html"), encoding="utf-8") as f:
+            body = f.read().replace("{{TITLE}}", html.escape(TITLE)).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def send_json(self, obj, code=200):
         body = json.dumps(obj).encode()
         self.send_response(code)
@@ -360,8 +371,10 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json({"error": str(e)}, 502)
         elif url.path == "/api/stream":
             self.stream()
+        elif url.path in ("/", "/index.html"):
+            self.send_index()
         elif url.path == "/api/info":
-            self.send_json({"tempo": TEMPO, "mimir": MIMIR, "tenant": TENANT, "lag": LAG,
+            self.send_json({"title": TITLE, "tempo": TEMPO, "mimir": MIMIR, "tenant": TENANT, "lag": LAG,
                             "maxTraces": MAX_TRACES, "stats": POLLER.stats})
         else:
             super().do_GET()

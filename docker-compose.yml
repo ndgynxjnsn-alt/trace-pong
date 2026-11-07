@@ -31,6 +31,7 @@ services:
       TEMPO_URL: ${TEMPO_URL:-http://tempo:3200}
       MIMIR_URL: ${MIMIR_URL:-http://mimir:9009/prometheus}
       TENANT: ${TENANT:-}
+      TITLE: ${TITLE:-trace-pong}
 
   loadgen:
     <<: *mesh

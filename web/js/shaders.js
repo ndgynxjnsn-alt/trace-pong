@@ -98,7 +98,7 @@ struct FsOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
 `;
 
 // ---------------------------------------------------------------------------
-// Edges: tessellated curve segments; soft line + flowing dashes toward the callee
+// Edges: tessellated curve segments; soft line with glow
 // ---------------------------------------------------------------------------
 export const edges = /* wgsl */`
 struct EIn {
@@ -139,22 +139,20 @@ struct EOut {
   let hwpx = in.hw * z;
   let core = 1.0 - smoothstep(hwpx - 0.5, hwpx + 0.8, px);
   let glow = exp(-px * px / (2.0 * (hwpx + 3.0) * (hwpx + 3.0)));
-  let wave = 0.5 + 0.5 * sin((in.s - G.screen.z * 140.0) * 0.045);
-  let dash = pow(wave, 14.0) * in.flow;
-  let col = in.col.rgb * (core * 0.5 + glow * 0.12 + dash * (core * 1.8 + glow * 0.4));
+  let col = in.col.rgb * (core * 0.5 + glow * 0.12);
   return vec4f(col * in.col.a, 0.0);
 }
 `;
 
 // ---------------------------------------------------------------------------
-// Nodes: Tempo-style ring (green ok / red error arc), dark core, hue glow, pong paddle
+// Nodes: Tempo-style ring (green ok / red error arc), dark core, hue glow
 // ---------------------------------------------------------------------------
 export const nodes = /* wgsl */`
 struct NIn {
   @location(0) a: vec4f,  // x, y, radius, pulse
   @location(1) b: vec4f,  // hue rgb, error fraction
-  @location(2) c: vec4f,  // paddle angle, heat, kind, alpha
-  @location(3) d: vec4f,  // paddle flash, hover, -, -
+  @location(2) c: vec4f,  // -, heat, kind, alpha
+  @location(3) d: vec4f,  // hit flash, hover, -, -
 };
 struct NOut {
   @builtin(position) pos: vec4f,
@@ -184,7 +182,6 @@ fn angDiff(a: f32, b: f32) -> f32 {
   let pulse = in.a.w;
   let hue = in.b.rgb;
   let err = in.b.a;
-  let paddle = in.c.x;
   let heat = in.c.y;
   let kind = i32(in.c.z + 0.5);
   let alpha = in.c.w;
@@ -225,13 +222,6 @@ fn angDiff(a: f32, b: f32) -> f32 {
   let loadR = r - 7.0;
   let loadMask = (1.0 - smoothstep(0.5 - aa, 0.5 + aa, abs(d - loadR))) * step(a01, clamp(heat, 0.0, 1.0));
   outc += hue * loadMask * 0.9;
-
-  // pong paddle: bright arc outside the ring, turns to face the incoming ball
-  let pr = r + 9.0;
-  let pmask = (1.0 - smoothstep(1.8 - aa, 1.8 + aa, abs(d - pr)))
-            * (1.0 - smoothstep(0.30, 0.36, angDiff(ang, paddle)));
-  outc += mix(vec3f(0.55, 0.9, 1.0), vec3f(1.0), flash) * pmask * (0.7 + flash * 3.0);
-  outa += pmask * 0.2;
 
   // halo: hue glow by heat, red throb when erroring
   let od = max(d - r, 0.0);
