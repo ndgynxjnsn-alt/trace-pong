@@ -63,10 +63,26 @@ additive light. The passes are:
 5. bloom: 6-level dual-filter (Kawase) down/up chain with soft threshold;
 6. composite: ACES tonemap, slight chromatic aberration, vignette, film grain.
 
-Text (labels, status codes, span names) is a 2D canvas on top, and the HUD is plain DOM. There is no build
-step and no dependencies: `plugin/module.js` is a hand-written AMD module (the format Grafana loads
-plugins in) that defines the panel and its options with React from Grafana, and lazily imports the
-renderer, which is native ES modules plus WGSL under `plugin/js/`.
+Text (labels, status codes, span names) is a 2D canvas on top, and the HUD is plain DOM.
+
+### Code
+
+TypeScript (strict) under [src/](src/), no runtime dependencies besides what Grafana provides:
+
+| File | |
+|---|---|
+| `module.tsx` | the panel: options, data source resolution, React wrapper |
+| `app.ts` | one instance in a panel element: input, camera, frame loop |
+| `scene.ts` | layout, playback clock, ball scheduling, effects, GPU instance data |
+| `gpu.ts`, `shaders.ts` | WebGPU pipelines and WGSL |
+| `tempo.ts` | live data: PromQL service graph, Tempo search and span pairing |
+| `sim.ts` | the built-in simulator |
+| `overlay.ts`, `hud.ts`, `ui.ts` | 2D labels, tooltip/clock, panel DOM and CSS |
+| `audio.ts` | synthesized explosions |
+
+[build.mjs](build.mjs) bundles `src/module.tsx` with esbuild into one AMD `module.js` (the format Grafana
+loads plugins in; React, `@grafana/data`, `@grafana/runtime` and `rxjs` come from Grafana), writes
+`plugin.json` with the version from `package.json`, and zips it. `tsc` only type-checks.
 
 ### Prior art this borrows from
 
@@ -81,10 +97,11 @@ renderer, which is native ES modules plus WGSL under `plugin/js/`.
 
 ## Install
 
-The plugin is unsigned, so Grafana must be told to load it:
+The plugin is unsigned, so Grafana must be told to load it. Build the ZIP first (uses `npm` if installed,
+otherwise a `node:22` container):
 
 ```bash
-python3 scripts/package.py            # -> dist/tracepong-live-panel-1.2.0.zip
+scripts/build.sh                     # type-check, build -> dist/tracepong-live-panel-1.3.0.zip
 ```
 
 * **Any Grafana ≥ 11** (tested with 13.1): unzip into the plugin folder and allow the unsigned plugin:
@@ -97,7 +114,7 @@ python3 scripts/package.py            # -> dist/tracepong-live-panel-1.2.0.zip
   which unpacks every mounted ZIP before starting Grafana. Copy the `grafana` service from
   [docker-compose.yml](docker-compose.yml).
 * **From a URL** (e.g. a release asset):
-  `GF_PLUGINS_PREINSTALL_SYNC=tracepong-live-panel@1.2.0@https://…/tracepong-live-panel-1.2.0.zip`.
+  `GF_PLUGINS_PREINSTALL_SYNC=tracepong-live-panel@1.3.0@https://…/tracepong-live-panel-1.3.0.zip`.
 
 Then add a visualization of type **trace-pong** to a dashboard. The panel title is the title.
 
@@ -140,13 +157,14 @@ stay inside a service), <kbd>B</kbd>/<kbd>L</kbd>/<kbd>F</kbd> toggle bloom and 
 (cd .. && docker compose up -d alloy tempo mimir loki)
 
 # 2. the plugin ZIP, the demo shop (14 services + load generator) and a Grafana with the panel
-python3 scripts/package.py
+scripts/build.sh
 docker compose up -d --build
 
 open http://localhost:3001            # the trace-pong dashboard is the home page
 ```
 
-After changing `plugin/`, run `python3 scripts/package.py && docker compose restart grafana` and reload.
+After changing `src/`, run `scripts/build.sh && docker compose restart grafana` and reload. With node installed:
+`npm ci`, then `npm run typecheck`, `npm run dev` (unminified, source maps) or `npm run dist`.
 `GRAFANA_PORT`, `TEMPO_URL`, `MIMIR_URL`, `LGTM_NETWORK` and `OTLP_ENDPOINT` adapt the compose to another stack.
 
 ## The demo shop (`mesh/`)

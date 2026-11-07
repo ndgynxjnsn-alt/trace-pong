@@ -6,7 +6,7 @@
 #
 # Joins the network of the LGTM stack (../docker-compose.yml, project "graf_zahl"):
 #   (cd .. && docker compose up -d alloy tempo mimir loki)
-#   python3 scripts/package.py && docker compose up -d --build
+#   scripts/build.sh && docker compose up -d --build
 # Override LGTM_NETWORK / OTLP_ENDPOINT / TEMPO_URL / MIMIR_URL / GRAFANA_PORT for a different stack.
 name: trace-pong
 
