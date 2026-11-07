@@ -6,6 +6,7 @@ import { Overlay } from './overlay.js';
 import { Hud } from './hud.js';
 import { SimSource } from './data.js';
 import { TempoSource } from './tempo.js';
+import { Sfx } from './audio.js';
 
 const SOURCE_KEYS = ['mode', 'tempoUrl', 'promUrl', 'traceql', 'labelFilter', 'window', 'maxTraces'];
 
@@ -17,6 +18,7 @@ const HTML = `
     <button data-act="in" title="Zoom in (wheel while the panel is active)">+</button>
     <button data-act="out" title="Zoom out">&minus;</button>
     <button data-act="fit" title="Fit (F, or double-click)"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="3" width="10" height="10" rx="2"/><circle cx="8" cy="8" r="1.5" fill="currentColor"/></svg></button>
+    <button data-act="sound" title="Sound on/off (M)"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M2.5 6h2.5l3.5-3v10l-3.5-3H2.5z" fill="currentColor" stroke="none"/><path class="tp-on" d="M10.5 5.5a3.5 3.5 0 0 1 0 5M12.3 3.6a6 6 0 0 1 0 8.8"/><path class="tp-off" d="M10.5 6l4 4M14.5 6l-4 4"/></svg></button>
     <button data-act="full" title="Full screen (Shift+F)"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"/></svg></button>
   </div>
   <div class="tp-error"></div>
@@ -32,6 +34,7 @@ const HTML = `
     <table>
       <tr><td><kbd>drag</kbd> <kbd>wheel</kbd></td><td>pan / zoom (double-click to re-fit). Wheel zooms once you clicked the panel, in full screen, or with <kbd>ctrl</kbd></td></tr>
       <tr><td><kbd>Shift</kbd>+<kbd>F</kbd></td><td>full screen</td></tr>
+      <tr><td><kbd>M</kbd></td><td>sound on/off</td></tr>
       <tr><td><kbd>click</kbd></td><td>pin focus on a service</td></tr>
       <tr><td><kbd>space</kbd></td><td>pause</td></tr>
       <tr><td><kbd>+</kbd> <kbd>-</kbd></td><td>ball speed</td></tr>
@@ -60,6 +63,10 @@ const CSS = `
   border-radius: 7px; border: 1px solid rgba(255,255,255,0.12); background: rgba(16, 18, 28, 0.75); color: #dfe6f2;
   font: 600 16px/1 var(--tp-mono); }
 .tp-root .tp-tools button:hover { background: rgba(40, 46, 66, 0.9); border-color: rgba(0, 229, 255, 0.5); color: #fff; }
+.tp-root .tp-tools button .tp-on { display: none; }
+.tp-root .tp-tools button.tp-active { color: #00e5ff; border-color: rgba(0, 229, 255, 0.5); }
+.tp-root .tp-tools button.tp-active .tp-on { display: inline; }
+.tp-root .tp-tools button.tp-active .tp-off { display: none; }
 .tp-root:focus { box-shadow: inset 0 0 0 1px rgba(0, 229, 255, 0.25); }
 .tp-root:fullscreen { box-shadow: none; }
 .tp-root .tp-error { position: absolute; top: 46px; right: 14px; max-width: 60%; text-align: right; color: var(--tp-bad);
@@ -115,6 +122,7 @@ export async function createTracePong(container, env, options) {
   container.appendChild(root);
   const $ = (cls) => root.querySelector(`.tp-${cls}`);
 
+  const sfx = new Sfx();
   let o = { ...options };
   let destroyed = false;
   let raf = 0;
@@ -127,6 +135,7 @@ export async function createTracePong(container, env, options) {
       cleanup.forEach((f) => f());
       source?.stop();
       renderer?.device.destroy();
+      sfx.destroy();
       root.remove();
     },
   };
@@ -146,6 +155,8 @@ export async function createTracePong(container, env, options) {
   const overlay = new Overlay($('text'));
   const hud = new Hud(root, scene, { status: { error: null } });
   const cam = { x: 0, y: 0, zoom: 0.8, auto: true };
+  // pan by where the boom is on screen
+  const playSfx = (sev, wx) => sfx.play(sev, ((wx - cam.x) * cam.zoom) / Math.max(1, W / 2));
   let applied = {};
 
   function apply() {
@@ -159,6 +170,7 @@ export async function createTracePong(container, env, options) {
       source = o.mode === 'sim' ? new SimSource(scene) : new TempoSource(scene, env, o);
       hud.scene = scene;
       hud.source = source;
+      scene.sfx = playSfx;
       cam.auto = true;
     }
     if (applied.speed !== o.speed && o.speed) scene.speed = o.speed;
@@ -260,6 +272,23 @@ export async function createTracePong(container, env, options) {
   }, { passive: false });
   on(text, 'dblclick', () => { cam.auto = true; });
 
+  // Sound needs a user gesture to start (autoplay rules); the on/off choice is remembered per browser.
+  const soundBtn = root.querySelector('.tp-tools [data-act=sound]');
+  const setSound = (on) => {
+    sfx.setOn(on);
+    soundBtn.classList.toggle('tp-active', on);
+    try { localStorage.setItem('tracepong.sound', on ? '1' : '0'); } catch { /* storage blocked */ }
+  };
+  const toggleSound = () => { setSound(!sfx.on); toast(sfx.on ? 'sound on' : 'sound off'); };
+  let wantSound = false;
+  try { wantSound = localStorage.getItem('tracepong.sound') === '1'; } catch { /* storage blocked */ }
+  soundBtn.classList.toggle('tp-active', wantSound);
+  if (wantSound) {
+    const start = () => { if (!sfx.on && soundBtn.classList.contains('tp-active')) sfx.setOn(true); };
+    on(root, 'pointerdown', start, { once: true });
+    on(root, 'keydown', start, { once: true });
+  }
+
   const toggleFull = () => {
     if (document.fullscreenElement === root) document.exitFullscreen?.();
     else root.requestFullscreen?.().then(() => root.focus({ preventScroll: true })).catch((err) => toast(`full screen not allowed: ${err.message}`));
@@ -270,6 +299,7 @@ export async function createTracePong(container, env, options) {
     else if (act === 'out') zoomAt(0.8);
     else if (act === 'fit') cam.auto = true;
     else if (act === 'full') toggleFull();
+    else if (act === 'sound') toggleSound();
   });
   on($('tools'), 'dblclick', (e) => e.stopPropagation());
 
@@ -304,6 +334,7 @@ export async function createTracePong(container, env, options) {
       case 'l': overlay.labels = !overlay.labels; break;
       case 'f': cam.auto = true; break;
       case 'F': toggleFull(); break;
+      case 'm': toggleSound(); break;
       case '+': case '=': scene.speed = Math.min(4, scene.speed * 1.25); toast(`ball speed ×${scene.speed.toFixed(2)}`); break;
       case '-': scene.speed = Math.max(0.25, scene.speed / 1.25); toast(`ball speed ×${scene.speed.toFixed(2)}`); break;
       case ']': scene.stretch = Math.min(50, scene.stretch * 1.5); toast(`latency stretch ×${scene.stretch.toFixed(1)}`); break;
@@ -345,7 +376,7 @@ export async function createTracePong(container, env, options) {
     raf = requestAnimationFrame(frame);
   };
   raf = requestAnimationFrame(frame);
-  api.debug = () => ({ scene, cam, renderer, source });
+  api.debug = () => ({ scene, cam, renderer, source, sfx });
   return api;
 }
 

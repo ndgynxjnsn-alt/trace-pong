@@ -23,6 +23,30 @@ export const RED = [1.0, 0.09, 0.14];
 const RED_CSS = '#ff4d5e';
 const AMBER = [1.0, 0.55, 0.08];
 
+// One colour per trace (from the trace id), so a request keeps it across the whole graph.
+// Reds are left out: they mean errors.
+const traceRgbCache = new Map();
+function traceRgb(tr) {
+  let c = traceRgbCache.get(tr);
+  if (!c) {
+    const h = hashStr(tr || String(Math.random()));
+    c = hslRgb(0.07 + h * 0.86, 0.95, 0.62).map(toLin);
+    if (traceRgbCache.size > 5000) traceRgbCache.clear();
+    traceRgbCache.set(tr, c);
+  }
+  return c;
+}
+
+// Shockwave look per status code (HTTP codes; 0 = no code, e.g. database calls).
+function statusFx(h) {
+  const c = h.c || 0;
+  if (h.e || c >= 500) return { sev: 'err', rgb: RED, grow: 2.2, life: 0.7, a: 0.9 };
+  if (c >= 400) return { sev: 'warn', rgb: AMBER, grow: 1.2, life: 0.6, a: 0.75 };
+  if (c >= 300) return { sev: 'redirect', rgb: [0.25, 0.5, 1.0], grow: 0.8, life: 0.5, a: 0.55 };
+  if (c >= 200) return { sev: 'ok', rgb: [0.15, 1.0, 0.45], grow: 0.7, life: 0.45, a: 0.4 };
+  return { sev: 'ok', rgb: null, grow: 0.7, life: 0.45, a: 0.4 };
+}
+
 const KIND = { service: 0, database: 1, external: 2, user: 3 };
 
 // ---------------------------------------------------------------------------
@@ -116,8 +140,8 @@ export class Scene {
     this.rings = [];      // shockwaves
     this.texts = [];      // floating labels
     this.play = 0;        // playback time (epoch ms, same domain as hop timestamps)
-    this.delay = null;    // wall - play
-    this.targetDelay = null;
+    this.delay = null;    // wall - play; fixed once set, so playback always runs at 1x
+    this.sfx = null;      // (severity, worldX) -> void, for sound
     this.paused = false;
     this.speed = 1;       // ball speed multiplier
     this.stretch = 2;     // how many visual ms a real span ms takes while a ball is "held"
@@ -288,23 +312,20 @@ export class Scene {
     if (!hops.length) return;
     let maxT = -Infinity;
     for (const h of hops) maxT = Math.max(maxT, h.t);
+    // The playback clock runs at real speed, a fixed delay behind the wall clock. Traces that
+    // arrive later than that are shifted forward a little rather than slowing the clock down.
     if (this.delay === null) {
       this.delay = wallNow - maxT + 3500;
-      this.targetDelay = this.delay;
+      this.play = wallNow - this.delay;
     }
-    if (!backlog) {
-      // keep the newest hop ~2.5 s in the future of the playback clock
-      const want = wallNow - maxT + 2500;
-      this.targetDelay = this.targetDelay === null ? want : Math.max(want, this.targetDelay * 0.9 + want * 0.1);
-      this.lastHopWall = wallNow;
-    }
+    if (!backlog) this.lastHopWall = wallNow;
     const byTrace = new Map();
     for (const h of hops) {
       if (!byTrace.has(h.tr)) byTrace.set(h.tr, []);
       byTrace.get(h.tr).push(h);
     }
     const cutoff = this.play - 1500;
-    for (const list of byTrace.values()) this.scheduleTrace(list, cutoff);
+    for (const list of byTrace.values()) this.scheduleTrace(list, cutoff, !backlog);
     this.queue.sort((a, b) => a.depart - b.depart);
   }
 
@@ -312,8 +333,17 @@ export class Scene {
     return Math.min(1500, Math.max(260, (e.total / 720) * 1000)) / this.speed;
   }
 
-  scheduleTrace(hops, cutoff) {
+  scheduleTrace(hops, cutoff, shiftLate) {
     hops.sort((a, b) => a.t - b.t);
+    // late trace: start it now-ish (spread over a poll interval) instead of dropping it;
+    // anything more than 20 s late is stale and skipped
+    let shift = 0;
+    const late = this.play - hops[0].t;
+    if (shiftLate && late > 0) {
+      if (late > 20000) return;
+      shift = late + Math.random() * 900;
+    }
+    const rgb = traceRgb(hops[0].tr);
     // parent = the latest hop into our caller that started before us
     for (const h of hops) {
       h.kids = [];
@@ -345,11 +375,11 @@ export class Scene {
       }
       const ret = ready;
       if (depart >= cutoff) {
-        this.queue.push({ hop: h, edge: e, depart, arrive, ret, back: ret + T, phase: 0, err: h.e, slow: h.d > 250 });
+        this.queue.push({ hop: h, edge: e, depart, arrive, ret, back: ret + T, phase: 0, err: h.e, slow: h.d > 250, rgb });
       }
       return ret + T;
     };
-    for (const h of hops) if (!h.parent) plan(h, h.t);
+    for (const h of hops) if (!h.parent) plan(h, h.t + shift);
   }
 
   // ---- effects -------------------------------------------------------------
@@ -382,24 +412,28 @@ export class Scene {
     n.inflight++;
     const ang = from ? Math.atan2(from.x - n.x, -(from.y - n.y)) : Math.PI * 1.5;
     const inDir = from ? Math.atan2(n.y - from.y, n.x - from.x) : 0;
-    if (b.err) {
+    const fx = statusFx(h);
+    if (fx.sev === 'err') {
       // errors smash into the node
       n.errs++;
       n.flash = 0;
       this.burst(n.x, n.y, 70, RED, 420, 0.9, 2.6);
-      this.burst(n.x, n.y, 30, [1, 0.7, 0.3], 240, 0.6, 1.8, inDir, 1.2);
-      this.ring(n.x, n.y, RED, n.r, n.r * 3.2, 0.7);
+      this.burst(n.x, n.y, 30, b.rgb, 240, 0.6, 1.8, inDir, 1.2);
+      this.ring(n.x, n.y, RED, n.r, n.r * (1 + fx.grow), fx.life, fx.a);
       n.shake = 1;
+      this.sfx?.('err', n.x);
     } else {
       n.flash = 1;
       // sparks fly back off the ring where the ball hit
       const px = n.x + Math.sin(ang) * n.r, py = n.y - Math.cos(ang) * n.r;
-      this.burst(px, py, b.slow ? 12 : 4, from ? from.lin : n.lin, 160, 0.4, 1.4, inDir + Math.PI, 1.6);
-      // shockwaves are throttled per node so busy nodes don't white out
-      if (this.time - (n.lastRing || 0) > 0.35 || b.slow) {
+      const warn = fx.sev === 'warn';
+      this.burst(px, py, warn ? 24 : b.slow ? 12 : 4, warn ? AMBER : b.rgb, warn ? 220 : 160, 0.4, 1.4, inDir + Math.PI, warn ? 3 : 1.6);
+      // shockwave in the status colour; 2xx/3xx are throttled per node so busy nodes don't white out
+      if (warn || this.time - (n.lastRing || 0) > 0.35 || b.slow) {
         n.lastRing = this.time;
-        this.ring(n.x, n.y, n.lin, n.r, n.r + 22, 0.45, 0.45);
+        this.ring(n.x, n.y, fx.rgb || n.lin, n.r, n.r * (1 + fx.grow), fx.life, fx.a);
       }
+      this.sfx?.(fx.sev, n.x);
     }
     // a label for the call, rate limited
     if (this.textBudget > 0 && (h.f === 'user' || b.err || Math.random() < 0.12)) {
@@ -431,11 +465,6 @@ export class Scene {
   update(wall, dt) {
     this.time += dt;
     this.textBudget = Math.min(this.textBudget + dt * 14, 14);
-    if (this.delay !== null && this.targetDelay !== null && !this.paused) {
-      // ease toward the target delay; never jump backwards in time
-      const diff = this.targetDelay - this.delay;
-      this.delay += diff * Math.min(1, dt * (diff > 0 ? 1.5 : 0.15));
-    }
     if (!this.paused && this.delay !== null) this.play = Math.max(this.play, wall - this.delay);
     else if (this.paused && this.delay !== null) this.delay = wall - this.play;
     if (this.layoutDirty) this.layout();
@@ -552,14 +581,14 @@ export class Scene {
         // held inside the server: orbiting dot, shows concurrency
         const ang = this.time * 2.4 + (b.depart % 1000) * 0.0063;
         const rr = dst.r * 0.55;
-        o.under.push(dst.x + Math.cos(ang) * rr, dst.y + Math.sin(ang) * rr, 1.6, 0, ...(b.err ? RED : src.lin), 0.5 * dim);
+        o.under.push(dst.x + Math.cos(ang) * rr, dst.y + Math.sin(ang) * rr, 1.6, 0, ...b.rgb, 0.5 * dim);
         continue;
       }
       const req = b.phase === 0;
       const t0 = req ? b.depart : b.ret, t1 = req ? b.arrive : b.back;
       const dur = t1 - t0;
       const size = (req ? 3.4 : 2.7) + Math.min(3.5, Math.log10(1 + h.d) * 1.3) + (b.err ? 1.5 : 0);
-      const rgb = b.err ? RED : req ? src.lin : (h.c >= 400 ? AMBER : dst.lin);
+      const rgb = b.rgb;   // the trace's colour, on the way there and back
       const lane = req ? 4 : -4;
       const ghosts = 9;
       for (let g = ghosts; g >= 0; g--) {

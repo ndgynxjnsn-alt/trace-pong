@@ -13,8 +13,12 @@ traffic, as promviz/Vizceral do. Unlike those, every ball is a **real call from 
   callee and bounces off its ring in a spray of sparks. The ball stays inside (orbiting) for the span's
   duration and its own downstream calls, then **bounces back** as the response. Each trace replays as a
   causal rally: a downstream call only leaves once the ball that caused it has arrived.
-* **Errors** smash into the node and explode in red sparks, and the status code flies off at the
-  caller. The ring's health arc turns red.
+  Every trace has its own colour (from the trace id), so a request keeps it as it travels across the graph.
+* **Shockwaves follow the status code**: green for 2xx, blue for 3xx, a bigger amber one for 4xx. Errors
+  (5xx or error status) smash into the node in a large red explosion, and the code flies off at the caller.
+* **Sound** (off by default, speaker button or <kbd>M</kbd>): synthesized space explosions, large for errors,
+  medium for 4xx, distant pops for the rest. All voices share a long reverb and a compressor so they stack
+  into a rumble, and a per-severity budget keeps busy graphs listenable.
 * Hover a service for its callers and callees with rate, latency and error rate.
 * It is an ordinary panel: add it to any dashboard, pick the Tempo data source, filter with TraceQL.
 
@@ -41,8 +45,9 @@ data source settings come from Grafana.
   the TraceQL filter, fetches the new ones by ID (up to *Traces per second*), and pairs spans the way the
   service-graph processor does: SERVER/CONSUMER span + parent CLIENT/PRODUCER span in another service, or a
   CLIENT span with no child and a peer attribute.
-* Hops replay on a clock running a few seconds behind real time (about 15 s with the Tempo setting below);
-  the delay adapts to how late traces arrive. The clock top left shows playback time.
+* Hops replay on a clock that always runs at real speed, a fixed delay behind real time (about 13 s with the
+  Tempo setting below), set from the first traces that arrive. A trace that comes in later than that is
+  started right away instead of slowing the clock. The clock top left shows playback time.
 
 Each viewer polls on its own, so *Traces per second* × viewers is the load on Tempo.
 
@@ -79,7 +84,7 @@ renderer, which is native ES modules plus WGSL under `plugin/js/`.
 The plugin is unsigned, so Grafana must be told to load it:
 
 ```bash
-python3 scripts/package.py            # -> dist/tracepong-live-panel-1.1.0.zip
+python3 scripts/package.py            # -> dist/tracepong-live-panel-1.2.0.zip
 ```
 
 * **Any Grafana ≥ 11** (tested with 13.1): unzip into the plugin folder and allow the unsigned plugin:
@@ -92,7 +97,7 @@ python3 scripts/package.py            # -> dist/tracepong-live-panel-1.1.0.zip
   which unpacks every mounted ZIP before starting Grafana. Copy the `grafana` service from
   [docker-compose.yml](docker-compose.yml).
 * **From a URL** (e.g. a release asset):
-  `GF_PLUGINS_PREINSTALL_SYNC=tracepong-live-panel@1.1.0@https://…/tracepong-live-panel-1.1.0.zip`.
+  `GF_PLUGINS_PREINSTALL_SYNC=tracepong-live-panel@1.2.0@https://…/tracepong-live-panel-1.2.0.zip`.
 
 Then add a visualization of type **trace-pong** to a dashboard. The panel title is the title.
 
@@ -125,7 +130,7 @@ full screen, or with <kbd>ctrl</kbd> held (and trackpad pinch); otherwise it scr
 top right zoom, re-fit and switch to **full screen** (also <kbd>Shift</kbd>+<kbd>F</kbd>; <kbd>Esc</kbd> leaves).
 Click a service to pin focus. Keys work while the panel has focus: <kbd>space</kbd> pauses,
 <kbd>+</kbd>/<kbd>-</kbd> change ball speed, <kbd>[</kbd>/<kbd>]</kbd> change latency stretch (how long balls
-stay inside a service), <kbd>B</kbd>/<kbd>L</kbd>/<kbd>F</kbd> toggle bloom and labels or re-fit, and
+stay inside a service), <kbd>B</kbd>/<kbd>L</kbd>/<kbd>F</kbd> toggle bloom and labels or re-fit, <kbd>M</kbd> toggles sound, and
 <kbd>H</kbd> shows help.
 
 ## Run the demo
