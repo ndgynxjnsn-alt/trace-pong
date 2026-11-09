@@ -6,6 +6,10 @@ are exactly what Tempo's service-graph processor pairs up:
   SERVER span per incoming request, CLIENT span per outgoing call,
   CLIENT spans with db.* / peer.service for uninstrumented dependencies (virtual nodes),
   PRODUCER -> CONSUMER spans for the simulated queue.
+
+The load generator plays a browser app instrumented with Grafana Faro ("shop-web"): every
+request is a root CLIENT span with Faro's user and session attributes, made by one of a
+rotating set of fake OAuth users, and carries the user's JWT to the gateway.
 """
 import json
 import math
@@ -17,6 +21,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -28,8 +33,9 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
-from topology import (INCIDENT_LENGTH, INCIDENT_PERIOD, INCIDENTS, TOPOLOGY,
-                      TRAFFIC_MIX)
+from topology import (FRONTEND_VIEWS, INCIDENT_LENGTH, INCIDENT_PERIOD, INCIDENTS,
+                      TOPOLOGY, TRAFFIC_MIX)
+from users import ActiveUsers, claims, make_users, token
 
 SERVICE = os.environ.get("SERVICE", "gateway")
 PORT = int(os.environ.get("PORT", "8080"))
@@ -40,11 +46,12 @@ def log(*args):
     print(f"[{SERVICE}]", *args, file=sys.stderr, flush=True)
 
 
-def setup_tracing():
+def setup_tracing(name=SERVICE, extra=None):
     resource = Resource.create({
-        "service.name": SERVICE,
+        "service.name": name,
         "service.namespace": NAMESPACE,
         "deployment.environment.name": os.environ.get("ENVIRONMENT", "demo"),
+        **(extra or {}),
     })
     provider = TracerProvider(resource=resource)
     # Endpoint and headers come from OTEL_EXPORTER_OTLP_* env vars.
@@ -105,6 +112,7 @@ class Mesh:
         self.tracer = tracer
         self.routes = compile_routes(TOPOLOGY.get(SERVICE, {}))
         self.pool = ThreadPoolExecutor(max_workers=64)
+        self.bearer = None   # only the frontend sends tokens
 
     # ---- outgoing ---------------------------------------------------------
     def http_call(self, service, method, path, kind=SpanKind.CLIENT, attrs=None):
@@ -119,8 +127,10 @@ class Mesh:
                 span.set_attribute(k, v)
             headers = {}
             propagate.inject(headers)
+            if self.bearer:
+                headers["Authorization"] = self.bearer
             req = urllib.request.Request(url, method=method, headers=headers,
-                                         data=b"{}" if method == "POST" else None)
+                                         data=b"{}" if method in ("POST", "PUT") else None)
             try:
                 with urllib.request.urlopen(req, timeout=20) as resp:
                     code = resp.status
@@ -134,16 +144,23 @@ class Mesh:
                 span.set_status(Status(StatusCode.ERROR))
             return code
 
-    def db_call(self, system, db_name, operation, table, ms):
-        name = f"{operation} {db_name or system}.{table}" if system != "redis" else f"{operation} {table}"
+    def db_call(self, system, server, database, operation, table, ms):
+        """Uninstrumented database: Tempo names the virtual node after db.name (or db.system).
+        server.address / db.namespace / db.collection.name give the server > database > table path."""
+        name = f"{operation} {database}.{table}" if database else f"{operation} {table}"
         with self.tracer.start_as_current_span(name, kind=SpanKind.CLIENT) as span:
             span.set_attribute("db.system", system)
-            if db_name:
-                span.set_attribute("db.name", db_name)
+            span.set_attribute("server.address", server)
+            if database:
+                span.set_attribute("db.name", database)          # older semconv; Tempo's virtual node
+                span.set_attribute("db.namespace", database)
             span.set_attribute("db.operation", operation)
-            span.set_attribute("server.address", db_name or system)
+            span.set_attribute("db.operation.name", operation)
+            span.set_attribute("db.collection.name", table)
             if system == "postgresql":
-                span.set_attribute("db.statement", f"{operation} ... FROM {table} WHERE id = $1")
+                span.set_attribute("db.sql.table", table)
+                verb = {"SELECT": "SELECT * FROM", "UPDATE": "UPDATE", "INSERT": "INSERT INTO", "DELETE": "DELETE FROM"}
+                span.set_attribute("db.statement", f"{verb.get(operation, operation)} {table} WHERE id = $1")
             nap(ms, latency_factor())
             # occasional db failure
             if random.random() < 0.002:
@@ -201,8 +218,8 @@ class Mesh:
                     otel_context.detach(token)
             return max(f.result() for f in [self.pool.submit(run, s) for s in step[1]])
         if kind == "db":
-            _, system, db, op, table, ms, p = step
-            return self.db_call(system, db, op, table, ms) if random.random() < p else 200
+            _, system, server, db, op, table, ms, p = step
+            return self.db_call(system, server, db, op, table, ms) if random.random() < p else 200
         if kind == "ext":
             _, peer, method, path, ms, p = step
             return self.ext_call(peer, method, path, ms) if random.random() < p else 200
@@ -233,6 +250,13 @@ class Mesh:
                 span.set_attribute("http.request.method", method)
                 span.set_attribute("http.route", pattern)
                 span.set_attribute("url.path", path)
+                # the gateway is the OAuth resource server: it reads the user from the bearer token
+                auth = headers.get("authorization", "")
+                if SERVICE == "gateway" and auth.startswith("Bearer "):
+                    c = claims(auth[7:])
+                    if c:
+                        span.set_attribute("user.id", c["sub"])
+                        span.set_attribute("enduser.id", c["sub"])
             nap(1.5, latency_factor())
             code = 200
             for step in steps:
@@ -276,7 +300,7 @@ def serve(mesh):
             self.end_headers()
             self.wfile.write(body)
 
-        do_GET = do_POST = _do
+        do_GET = do_POST = do_PUT = do_DELETE = _do
 
         def log_message(self, *a):
             pass
@@ -292,22 +316,55 @@ def serve(mesh):
 # Load generator
 # --------------------------------------------------------------------------
 def loadgen():
+    """A Faro-instrumented browser app, used by a rotating set of logged-in OAuth users."""
     target = os.environ.get("TARGET", "gateway")
     base = float(os.environ.get("RPS", "12"))
+    app = os.environ.get("FRONTEND_NAME", "shop-web")
+    tracer = setup_tracing(app, {"telemetry.sdk.language": "webjs", "service.version": "2.4.1"})
     routes, weights = zip(*TRAFFIC_MIX.items())
+    users = ActiveUsers(make_users(), size=int(os.environ.get("ACTIVE_USERS", "18")))
+    sessions = {}
     pool = ThreadPoolExecutor(max_workers=128)
     stats = {"ok": 0, "err": 0}
 
     def fire():
         route = random.choices(routes, weights)[0]
         method, path = route.split(" ", 1)
-        req = urllib.request.Request(f"http://{target}:{PORT}{fill(path)}", method=method,
-                                     data=b"{}" if method == "POST" else None)
-        try:
-            urllib.request.urlopen(req, timeout=30).close()
-            stats["ok"] += 1
-        except Exception:
-            stats["err"] += 1
+        user = users.pick()
+        session = sessions.setdefault(user["sub"], str(uuid.uuid4()))
+        view = FRONTEND_VIEWS.get(route, "/")
+        url = f"http://{target}:{PORT}{fill(path)}"
+        # Faro's fetch instrumentation: a root CLIENT span with user and session meta
+        with tracer.start_as_current_span(f"HTTP {method}", kind=SpanKind.CLIENT) as span:
+            span.set_attribute("http.request.method", method)
+            span.set_attribute("url.full", url)
+            span.set_attribute("user.id", user["sub"])
+            span.set_attribute("user.email", user["email"])
+            span.set_attribute("user.name", user["preferred_username"])
+            span.set_attribute("user.full_name", user["name"])
+            span.set_attribute("session.id", session)
+            span.set_attribute("view.name", view)
+            span.set_attribute("page.url", "https://shop.example" + view.replace(":id", str(random.randint(1, 500))))
+            headers = {"Authorization": f"Bearer {token(user)}"}
+            propagate.inject(headers)
+            nap(3)   # the browser's own work before the request goes out
+            req = urllib.request.Request(url, method=method, headers=headers,
+                                         data=b"{}" if method in ("POST", "PUT") else None)
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    code = resp.status
+                stats["ok"] += 1
+            except urllib.error.HTTPError as e:
+                code = e.code
+                stats["err"] += 1
+            except Exception as e:
+                span.record_exception(e)
+                code = 0
+                stats["err"] += 1
+            if code:
+                span.set_attribute("http.response.status_code", code)
+            if code == 0 or code >= 500:
+                span.set_status(Status(StatusCode.ERROR))
 
     burst_until = 0.0
     last_log = time.time()

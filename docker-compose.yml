@@ -1,6 +1,6 @@
 # trace-pong demo: Grafana with the trace-pong panel, plus a 14-service demo shop that feeds the LGTM stack.
 #
-#   loadgen -> gateway -> ... 14 services ... -> (virtual) postgres dbs, redis, elasticsearch, 3rd-party APIs
+#   loadgen (shop-web, Faro-like, OAuth users) -> gateway -> ... 15 services ... -> (virtual) postgres dbs, redis, elasticsearch, 3rd-party APIs
 #       every service exports OTLP traces to Alloy -> Tempo -> metrics-generator (service graph) -> Mimir
 #   Grafana (http://localhost:3001) runs the panel, which reads Tempo + Mimir through the data source proxy
 #
@@ -48,6 +48,8 @@ services:
       <<: *mesh-env
       SERVICE: loadgen
       RPS: ${RPS:-12}
+      FRONTEND_NAME: shop-web     # plays a Faro-instrumented browser app
+      ACTIVE_USERS: ${ACTIVE_USERS:-18}
 
   gateway:
     <<: *mesh
@@ -119,6 +121,11 @@ services:
     environment:
       <<: *mesh-env
       SERVICE: notification
+  account:
+    <<: *mesh
+    environment:
+      <<: *mesh-env
+      SERVICE: account
 
 networks:
   lgtm:
