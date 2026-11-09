@@ -30,7 +30,9 @@ traffic, as promviz/Vizceral do. Unlike those, every ball is a **real call from 
   callee and bounces off its ring in a spray of sparks. The ball stays inside (orbiting) for the span's
   duration and its own downstream calls, then **bounces back** as the response. Each trace replays as a
   causal rally: a downstream call only leaves once the ball that caused it has arrived.
-  Every trace has its own colour (from the trace id), so a request keeps it as it travels across the graph.
+  Every **user has their own colour**, and all balls of their traces carry it across the whole graph: the
+  trace id (propagated via `traceparent`) ties every hop to the root span, where the user is. Anonymous
+  traces get a colour from their trace id.
 * **Shockwaves follow the status code**: green for 2xx, blue for 3xx, a bigger amber one for 4xx. Errors
   (5xx or error status) smash into the node in a large red explosion, and the code flies off at the caller.
 * **Sound** (off by default, speaker button or <kbd>M</kbd>): synthesized space explosions, large for errors,
@@ -125,7 +127,7 @@ The plugin is unsigned, so Grafana must be told to load it. Build the ZIP first 
 otherwise a `node:22` container):
 
 ```bash
-scripts/build.sh                     # type-check, build -> dist/tracepong-live-panel-1.6.0.zip
+scripts/build.sh                     # type-check, build -> dist/tracepong-live-panel-1.7.0.zip
 ```
 
 * **Any Grafana ≥ 11** (tested with 13.1): unzip into the plugin folder and allow the unsigned plugin:
@@ -138,7 +140,7 @@ scripts/build.sh                     # type-check, build -> dist/tracepong-live-
   which unpacks every mounted ZIP before starting Grafana. Copy the `grafana` service from
   [docker-compose.yml](docker-compose.yml).
 * **From a URL** (e.g. a release asset):
-  `GF_PLUGINS_PREINSTALL_SYNC=tracepong-live-panel@1.6.0@https://…/tracepong-live-panel-1.6.0.zip`.
+  `GF_PLUGINS_PREINSTALL_SYNC=tracepong-live-panel@1.7.0@https://…/tracepong-live-panel-1.7.0.zip`.
 
 Then add a visualization of type **trace-pong** to a dashboard. The panel title is the title.
 

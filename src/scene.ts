@@ -35,6 +35,11 @@ const AMBER: Rgb = [1.0, 0.55, 0.08];
 // One colour per trace (from the trace id), so a request keeps it across the whole graph.
 // Reds are left out: they mean errors.
 const traceRgbCache = new Map<string, Rgb>();
+/** A user's own colour (sRGB): their node and every ball of their traces. Reds stay for errors. */
+function userRgb(id: string): Rgb {
+  return hslRgb(0.07 + hashStr(id) * 0.86, 0.9, 0.64);
+}
+
 function traceRgb(tr: string): Rgb {
   let c = traceRgbCache.get(tr);
   if (!c) {
@@ -78,8 +83,8 @@ const KIND: Record<NodeKind, number> = { service: 0, database: 1, external: 2, u
 /** separator inside node ids and group keys (never shown) */
 const SEP = '\u001f';
 const USERS_PER_COLUMN = 28;
-const USER_ROW_GAP = 36;
-const USER_COLUMN_GAP = 230;
+const USER_ROW_GAP = 54;
+const USER_COLUMN_GAP = 300;
 /** time constant (s) of the hop-based statistics */
 const TAU = 30;
 
@@ -556,7 +561,7 @@ export class Scene {
   private colorOf(spec: NodeSpec): Rgb {
     if (spec.level === 'user') {
       // pale, slightly different per person
-      return hslRgb(hashStr(spec.user?.id ?? spec.id), 0.45, 0.78);
+      return userRgb(spec.user?.id ?? spec.id);
     }
     const base = ownerRgb(spec.owner, spec.kind);
     if (spec.level !== 'endpoint') return base;
@@ -945,7 +950,7 @@ export class Scene {
       y0 = Math.min(...others.map((n) => n.y));
       y1 = Math.max(...others.map((n) => n.y));
     }
-    const x0 = minX - (this.mode.endpoints ? 300 : 240);
+    const x0 = minX - (this.mode.endpoints ? 440 : 380);
     const cy = (y0 + y1) / 2;
     users.forEach((n, i) => {
       const col = Math.floor(i / USERS_PER_COLUMN), row = i % USERS_PER_COLUMN;
@@ -967,7 +972,7 @@ export class Scene {
     }
     if (x === undefined) {
       const others = [...this.nodes.values()];
-      x = (others.length ? Math.min(...others.map((n) => n.x - n.r)) : 0) - 240;
+      x = (others.length ? Math.min(...others.map((n) => n.x - n.r)) : 0) - 380;
       return [x, this.userColumn?.cy ?? 0];
     }
     return [x, maxY === -Infinity ? this.userColumn?.cy ?? 0 : maxY + USER_ROW_GAP];
@@ -1026,7 +1031,10 @@ export class Scene {
       if (late > 20000) return;
       shift = late + Math.random() * 900;
     }
-    const rgb = traceRgb(hops[0].h.tr);
+    // a user's traces are all in the user's colour (the trace id ties every hop to the root span,
+    // where Faro/OAuth put the user); anonymous traces get a colour from their trace id
+    const user = hops.find((th) => th.h.u)?.h.u;
+    const rgb = user ? toLin(userRgb(user.id)) : traceRgb(hops[0].h.tr);
     // parent = the latest earlier hop into our caller (earlier in sorted order, so no cycles)
     const intoService = new Map<string, TraceHop[]>();
     for (const th of hops) {
@@ -1416,6 +1424,7 @@ export class Scene {
       for (let i = 0; i < hull.length; i++) {
         const a = hull[i], b = hull[(i + 1) % hull.length];
         if (a[1] < top[1]) top = a;
+        if (users) continue;   // the users column has a label, no outline
         // distance from the centre to this edge, for the rim in the fragment shader
         const ex = b[0] - a[0], ey = b[1] - a[1];
         const dist = Math.abs((cx - a[0]) * ey - (cy - a[1]) * ex) / (Math.hypot(ex, ey) || 1);
