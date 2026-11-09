@@ -83,6 +83,8 @@ const KIND: Record<NodeKind, number> = { service: 0, database: 1, external: 2, u
 /** separator inside node ids and group keys (never shown) */
 const SEP = '\u001f';
 const USERS_PER_COLUMN = 28;
+/** following a user shows what their traces touched in this much playback time (plus what is queued) */
+const USER_PATH_MS = 30000;
 const USER_ROW_GAP = 54;
 const USER_COLUMN_GAP = 300;
 /** time constant (s) of the hop-based statistics */
@@ -256,6 +258,8 @@ export interface Ball {
   err: boolean;
   slow: boolean;
   rgb: Rgb;
+  /** node id of the user whose trace this is, if known */
+  user: string | null;
 }
 
 interface Ring {
@@ -368,6 +372,8 @@ export class Scene {
   private firstData = 0;
   private tickAcc = 0;
   private readonly userSlots = new Map<string, Vec2>();
+  /** per user node: nodes and edges their traces touch, with the latest (playback) time (for following a user) */
+  private readonly userPaths = new Map<string, { nodes: Map<string, number>; edges: Map<string, number> }>();
   private userColumn: { x: number; cy: number } | null = null;
   /** database servers split into databases in the service view */
   private readonly dbServers = new Set<string>();
@@ -434,11 +440,13 @@ export class Scene {
     };
     if (this.graph && !this.mode.endpoints) this.applyGraph(this.graph);
     for (const h of this.recent) this.edgeFor(h);
+    this.userPaths.clear();
     for (const b of [...this.queue, ...this.balls]) {
       const e = this.edgeFor(b.hop);
       b.edge = e;
       b.src = e.s;
       b.dst = e.t;
+      if (b.user) this.notePath(b.user, e, b.depart);
     }
     for (const n of this.nodes.values()) seed(n);
     this.topologyDirty = true;
@@ -1035,6 +1043,7 @@ export class Scene {
     // where Faro/OAuth put the user); anonymous traces get a colour from their trace id
     const user = hops.find((th) => th.h.u)?.h.u;
     const rgb = user ? toLin(userRgb(user.id)) : traceRgb(hops[0].h.tr);
+    const userId = user ? `user${SEP}${user.id}` : null;
     // parent = the latest earlier hop into our caller (earlier in sorted order, so no cycles)
     const intoService = new Map<string, TraceHop[]>();
     for (const th of hops) {
@@ -1064,7 +1073,8 @@ export class Scene {
       }
       const ret = ready;
       if (depart >= cutoff) {
-        this.queue.push({ hop: h, edge: e, src: e.s, dst: e.t, depart, arrive, ret, back: ret + T, phase: 0, err: h.e, slow: h.d > 250, rgb });
+        this.queue.push({ hop: h, edge: e, src: e.s, dst: e.t, depart, arrive, ret, back: ret + T, phase: 0, err: h.e, slow: h.d > 250, rgb, user: userId });
+        if (userId) this.notePath(userId, e, depart);
       }
       return ret + T;
     };
@@ -1116,9 +1126,48 @@ export class Scene {
     }
   }
 
+  /** following a user: other traces still count, but make no fuss */
+  private quiet(b: Ball): boolean {
+    const id = this.focus || this.hover;
+    return !!id && this.userPaths.has(id) && b.user !== id;
+  }
+
+  private notePath(user: string, e: Edge, t: number): void {
+    let p = this.userPaths.get(user);
+    if (!p) this.userPaths.set(user, (p = { nodes: new Map(), edges: new Map() }));
+    for (const [m, k] of [[p.nodes, e.s], [p.nodes, e.t], [p.edges, e.key]] as const) m.set(k, Math.max(m.get(k) ?? 0, t));
+  }
+
+  /** what a user's traces are doing: the last USER_PATH_MS of playback plus everything queued */
+  private livePath(id: string | null): { nodes: Set<string>; edges: Set<string> } | undefined {
+    const p = id ? this.userPaths.get(id) : undefined;
+    if (!p) return undefined;
+    const since = this.play - USER_PATH_MS;
+    const keep = (m: Map<string, number>) => {
+      const out = new Set<string>();
+      for (const [k, t] of m) {
+        if (t >= since) out.add(k);
+        else m.delete(k);
+      }
+      return out;
+    };
+    return { nodes: keep(p.nodes), edges: keep(p.edges) };
+  }
+
   private onArrive(b: Ball): void {
     const h = b.hop, n = this.nodes.get(b.dst), from = this.nodes.get(b.src);
     if (!n) return;
+    if (this.quiet(b)) {
+      n.lastSeen = performance.now();
+      n.hHits += 1;
+      n.hLat += h.d;
+      if (h.e) n.hErr += 1;
+      b.edge.hHits += 1;
+      b.edge.hLat += h.d;
+      if (h.e) b.edge.hErr += 1;
+      n.inflight++;
+      return;
+    }
     n.lastSeen = performance.now();
     n.hHits += 1;
     n.hLat += h.d;
@@ -1163,7 +1212,7 @@ export class Scene {
   private onReturn(b: Ball): void {
     const h = b.hop, n = this.nodes.get(b.src), srv = this.nodes.get(b.dst);
     if (srv) srv.inflight = Math.max(0, srv.inflight - 1);
-    if (!n) return;
+    if (!n || this.quiet(b)) return;
     const code = h.c || (b.err ? 'ERR' : 'OK');
     if (b.err) {
       this.burst(n.x, n.y, 40, RED, 300, 0.8, 2.2);
@@ -1273,6 +1322,7 @@ export class Scene {
       if (idle > ttl && !n.dying && (n.inflight === 0 || idle > ttl * 2)) n.dying = true;
       if (n.dying && n.alpha <= 0) {
         this.nodes.delete(id);
+        this.userPaths.delete(id);
         if (this.focus === id) this.focus = null;
         if (this.hover === id) this.hover = null;
         removed = true;
@@ -1290,6 +1340,9 @@ export class Scene {
   focusSet(): Set<string> | null {
     const id = this.focus || this.hover;
     if (!id) return null;
+    // a user: everything their traces touch, end to end (frontend, gateway, backends, databases)
+    const path = this.livePath(id);
+    if (path) return new Set([id, ...path.nodes]);
     const s = new Set([id]);
     for (const e of this.edges.values()) {
       if (e.s === id) s.add(e.t);
@@ -1313,6 +1366,7 @@ export class Scene {
     const focusId = this.focus || this.hover;
     const dimOf = (id: string) => (!fs || fs.has(id) ? 1 : 0.18);
     const play = this.play;
+    const userPath = this.livePath(focusId);
 
     this.buildGroups(dimOf);
 
@@ -1320,7 +1374,7 @@ export class Scene {
     for (const e of this.edges.values()) {
       const a = this.nodes.get(e.s), b = this.nodes.get(e.t);
       if (!a || !b) continue;
-      const lit = !focusId || e.s === focusId || e.t === focusId;
+      const lit = !focusId || (userPath ? userPath.edges.has(e.key) : e.s === focusId || e.t === focusId);
       const errf = e.rate > 0 ? Math.min(1, (e.err / e.rate) * 4) : 0;
       let col = [0.16 + 0.84 * errf, 0.24 - 0.14 * errf, 0.42 - 0.3 * errf];
       if (this.hoverEdge === e.key) col = col.map((c) => c * 2.2);
@@ -1341,7 +1395,8 @@ export class Scene {
       const h = b.hop;
       const src = this.nodes.get(b.src), dst = this.nodes.get(b.dst);
       if (!src || !dst) continue;
-      const dim = fs ? (fs.has(b.src) && fs.has(b.dst) && (b.src === focusId || b.dst === focusId) ? 1 : 0.12) : 1;
+      const dim = userPath ? (b.user === focusId ? 1 : 0.05)
+        : fs ? (fs.has(b.src) && fs.has(b.dst) && (b.src === focusId || b.dst === focusId) ? 1 : 0.12) : 1;
       const rgb = b.rgb;   // the trace's colour, on the way there and back
       if (b.phase === 1) {
         // held inside the server: orbiting dot, shows concurrency

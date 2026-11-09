@@ -38,6 +38,10 @@ traffic, as promviz/Vizceral do. Unlike those, every ball is a **real call from 
 * **Sound** (off by default, speaker button or <kbd>M</kbd>): synthesized space explosions, large for errors,
   medium for 4xx, distant pops for the rest. All voices share a long reverb and a compressor so they stack
   into a rumble, and a per-severity budget keeps busy graphs listenable.
+* **Follow a user**: click a user to see what their traces do, end to end: every node and edge their
+  traces touched in the last 30 s (and what is queued) stays lit, from the frontend through the gateway
+  and backends to the databases; everything else, including other users' balls and explosions, fades.
+  Click again or press <kbd>Esc</kbd> to let go. Users are drawn as plain rings in their colour.
 * Hover a node for its callers and callees with rate, latency and error rate; users show name, email and id.
   Endpoint and user rates are estimated from the sampled traces, scaled to the service graph's totals.
 * Until there is data, a loading screen says what it is waiting for (data sources unreachable, no traces
@@ -127,7 +131,7 @@ The plugin is unsigned, so Grafana must be told to load it. Build the ZIP first 
 otherwise a `node:22` container):
 
 ```bash
-scripts/build.sh                     # type-check, build -> dist/tracepong-live-panel-1.7.0.zip
+scripts/build.sh                     # type-check, build -> dist/tracepong-live-panel-1.8.0.zip
 ```
 
 * **Any Grafana ≥ 11** (tested with 13.1): unzip into the plugin folder and allow the unsigned plugin:
@@ -140,7 +144,7 @@ scripts/build.sh                     # type-check, build -> dist/tracepong-live-
   which unpacks every mounted ZIP before starting Grafana. Copy the `grafana` service from
   [docker-compose.yml](docker-compose.yml).
 * **From a URL** (e.g. a release asset):
-  `GF_PLUGINS_PREINSTALL_SYNC=tracepong-live-panel@1.7.0@https://…/tracepong-live-panel-1.7.0.zip`.
+  `GF_PLUGINS_PREINSTALL_SYNC=tracepong-live-panel@1.8.0@https://…/tracepong-live-panel-1.8.0.zip`.
 
 Then add a visualization of type **trace-pong** to a dashboard. The panel title is the title.
 

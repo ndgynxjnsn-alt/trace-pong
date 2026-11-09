@@ -229,6 +229,15 @@ fn angDiff(a: f32, b: f32) -> f32 {
   let a01 = fract(ang / 6.2831853 + 1.0);
   let ringW = 3.2 + hover * 1.2;
 
+  // users: a plain thin ring in their colour around a dark core, nothing else
+  if (kind == 3) {
+    let w = 1.6 + hover * 1.0;
+    let m = 1.0 - smoothstep(w * 0.5 - aa, w * 0.5 + aa, abs(d - r));
+    let core = (1.0 - smoothstep(r - aa, r + aa, d)) * 0.85;
+    let oc = hue * (1.0 + hover * 0.6) * m + vec3f(0.010, 0.012, 0.022) * core * (1.0 - m);
+    return vec4f(oc, m + core * (1.0 - m)) * alpha;
+  }
+
   // dark core with a hue-tinted inner gradient
   let discA = 1.0 - smoothstep(r - aa, r + aa, d);
   let inner = 1.0 - d / r;

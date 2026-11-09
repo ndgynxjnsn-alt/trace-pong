@@ -37,7 +37,7 @@ export class Hud {
     if (s.play) {
       const d = new Date(s.play);
       this.date.textContent = d.toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-      this.time.textContent = `${d.toLocaleTimeString(undefined, { hour12: false })}.${String(d.getMilliseconds()).padStart(3, '0').slice(0, 1)}`;
+      this.time.textContent = d.toLocaleTimeString(undefined, { hour12: false });
     }
     this.error.textContent = this.source.status.error || '';
     // loading screen until the first nodes appear
