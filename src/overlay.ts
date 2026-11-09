@@ -104,12 +104,15 @@ export class Overlay {
         if (label.length > max) label = `${label.slice(0, max - 1)}…`;
         const size = small ? Math.max(9, Math.min(12, 10.5 * Math.sqrt(z))) : Math.max(10, Math.min(14, 12 * Math.sqrt(z)));
         c.font = `${big ? 700 : small ? 500 : 600} ${size}px ${n.level === 'user' && !scene.mode.userNames ? MONO : SANS}`;
-        const ly = y + r + (small ? 12 : 21 * Math.min(1, z + 0.3));
+        // users stand in a column: their label goes to the left (like Logstalgia's IPs), others below
+        const side = n.kind === 'user';
+        const lx = side ? x - r - 6 - c.measureText(label).width / 2 : x;
+        const ly = side ? y : y + r + (small ? 12 : 21 * Math.min(1, z + 0.3));
         const w = c.measureText(label).width / 2 + 3;
-        if (big || free(x - w, ly - size / 2 - 1, x + w, ly + size / 2 + 1)) {
-          placed.push([x - w, ly - size / 2 - 1, x + w, ly + size / 2 + 1]);
+        if (big || free(lx - w, ly - size / 2 - 1, lx + w, ly + size / 2 + 1)) {
+          placed.push([lx - w, ly - size / 2 - 1, lx + w, ly + size / 2 + 1]);
           c.fillStyle = `rgba(220,228,240,${(small ? 0.8 : 0.92) * la})`;
-          c.fillText(label, x, ly);
+          c.fillText(label, lx, ly);
         }
         // Tempo-style stats inside
         if (r > 16 && n.kind !== 'user') {

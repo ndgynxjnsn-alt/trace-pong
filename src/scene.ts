@@ -77,6 +77,9 @@ function statusFx(h: Hop): StatusFx {
 const KIND: Record<NodeKind, number> = { service: 0, database: 1, external: 2, user: 3 };
 /** separator inside node ids and group keys (never shown) */
 const SEP = '\u001f';
+const USERS_PER_COLUMN = 28;
+const USER_ROW_GAP = 36;
+const USER_COLUMN_GAP = 230;
 /** time constant (s) of the hop-based statistics */
 const TAU = 30;
 
@@ -204,6 +207,8 @@ export interface SceneNode extends SimulationNodeDatum {
   lastRing: number;
   /** recent activity (1 = just now), shows user labels for a moment */
   active: number;
+  /** when the node appeared (performance.now), orders the users column */
+  since: number;
   /** shown statistics: from the service graph, or estimated from hops */
   rate: number;
   errRate: number;
@@ -356,6 +361,9 @@ export class Scene {
   private nextArrange = 0;
   private arrangeSoon = false;
   private firstData = 0;
+  private tickAcc = 0;
+  private readonly userSlots = new Map<string, Vec2>();
+  private userColumn: { x: number; cy: number } | null = null;
   /** database servers split into databases in the service view */
   private readonly dbServers = new Set<string>();
   private readonly sim: Simulation<SceneNode, Link>;
@@ -493,7 +501,10 @@ export class Scene {
     const mate = mates?.find((m) => this.nodes.has(m.id));
     const jitter = () => (Math.random() - 0.5) * 60;
     let x: number, y: number;
-    if (mate) {
+    if (spec.kind === 'user') {
+      // users: next free place at the bottom of the users column
+      [x, y] = this.nextUserSlot();
+    } else if (mate) {
       x = mate.x + jitter();
       y = mate.y + jitter();
     } else if (this.mode.layout === 'flow') {
@@ -508,14 +519,14 @@ export class Scene {
     }
     const r0 = spec.level === 'user' ? 9 : spec.level === 'endpoint' ? 16 : 26;
     // newcomers just appear: in a free spot near where they belong, without moving anybody
-    [x, y] = this.freeSpot(x, y, r0, spec.level === 'user' ? 14 : 30);
+    if (spec.kind !== 'user') [x, y] = this.freeSpot(x, y, r0, 30);
     n = {
       ...spec,
       x,
       y,
       r: r0,
       rgb, lin: toLin(rgb), css: css(rgb),
-      pulse: 0, heat: 0, flash: 0, shake: 0, lastRing: 0, active: 0,
+      pulse: 0, heat: 0, flash: 0, shake: 0, lastRing: 0, active: 0, since: performance.now(),
       rate: 0, errRate: 0, mean: null, outRate: 0,
       hHits: 0, hErr: 0, hLat: 0, hOut: 0,
       fromGraph: false, alpha: 0, lastSeen: performance.now(), dying: false, inflight: 0,
@@ -736,6 +747,11 @@ export class Scene {
     }
     this.groupMembers = groups;
 
+    // users are not simulated: they stand in a column on the left (see layoutUsers)
+    const simNodes = nodes.filter((n) => n.kind !== 'user');
+    const forceGroups = new Map([...groups].filter(([k]) => k !== 'users'));
+    const hasUsers = simNodes.length < nodes.length;
+
     const rank = this.ranks();
     const rankOf = (n: SceneNode) => rank.get(n.owner) ?? 1;
     const ep = this.mode.endpoints;
@@ -745,10 +761,10 @@ export class Scene {
     const links: Link[] = [];
     for (const e of this.edges.values()) {
       const s = this.nodes.get(e.s), t = this.nodes.get(e.t);
-      if (s && t && s !== t) links.push({ source: s, target: t, same: s.owner === t.owner });
+      if (s && t && s !== t && s.kind !== 'user' && t.kind !== 'user') links.push({ source: s, target: t, same: s.owner === t.owner });
     }
     const sim = this.sim;
-    sim.nodes(nodes);
+    sim.nodes(simNodes);
     sim.force('link', forceLink<SceneNode, Link>(links)
       .distance((l) => (l.same ? 60 : flow ? COL * 0.7 : RING * 0.75))
       .strength((l) => (l.same ? 0.4 : 0.06)));
@@ -766,13 +782,15 @@ export class Scene {
       sim.force('y', forceY<SceneNode>((n) => (sec(n) - 0.5) * height).strength((n) => (n.level === 'user' ? 0.05 : n.kind === 'database' ? 0.03 : 0.12)));
       sim.force('radial', null);
     } else {
-      // rings by depth; each subtree gets its slice of the circle, users in the middle
+      // rings by depth; each subtree gets its slice of the circle. The users stand to the left,
+      // so the first service they call (the frontend) takes the middle.
+      const ringOf = (n: SceneNode) => Math.max(0, rankOf(n) - (hasUsers ? 1 : 0));
       const at = (n: SceneNode): Vec2 => {
-        const r = rankOf(n) * RING, a = sec(n) * Math.PI * 2;
+        const r = ringOf(n) * RING, a = sec(n) * Math.PI * 2;
         return [Math.cos(a) * r, Math.sin(a) * r];
       };
-      sim.force('radial', forceRadial<SceneNode>((n) => rankOf(n) * RING, 0, 0).strength(0.45));
-      const pull = (n: SceneNode) => (!rankOf(n) ? 0.02 : n.kind === 'database' ? 0.03 : 0.12);
+      sim.force('radial', forceRadial<SceneNode>((n) => ringOf(n) * RING, 0, 0).strength(0.45));
+      const pull = (n: SceneNode) => (!ringOf(n) ? 0.02 : n.kind === 'database' ? 0.03 : 0.12);
       sim.force('x', forceX<SceneNode>((n) => at(n)[0]).strength(pull));
       sim.force('y', forceY<SceneNode>((n) => at(n)[1]).strength(pull));
     }
@@ -780,7 +798,7 @@ export class Scene {
     // their outlines apart (node collision alone lets two groups interleave)
     // sibling groups: top-level groups, and the groups inside each group (databases of a server)
     const siblings = new Map<string, SceneNode[][]>();
-    for (const [k, m] of groups) {
+    for (const [k, m] of forceGroups) {
       const parent = k.includes(SEP) ? k.slice(0, k.lastIndexOf(SEP)) : '';
       let list = siblings.get(parent);
       if (!list) siblings.set(parent, (list = []));
@@ -828,7 +846,7 @@ export class Scene {
       }
     };
     // database servers attract each other (medium), so the data layer forms one cluster
-    const dbs = nodes.filter((n) => n.kind === 'database');
+    const dbs = simNodes.filter((n) => n.kind === 'database');
     sim.force('dbCluster', (alpha: number) => {
       if (dbs.length < 2) return;
       let cx = 0, cy = 0;
@@ -845,7 +863,7 @@ export class Scene {
       }
     });
     sim.force('group', (alpha: number) => {
-      for (const [key, members] of groups) {
+      for (const [key, members] of forceGroups) {
         if (members.length < 2) continue;
         const depth = key.split(SEP).length;
         // the users bubble is kept loose; inner groups (databases of a server) tight
@@ -870,8 +888,13 @@ export class Scene {
    * Newcomers appear in a free spot in between. Shorter calm while the graph first fills in;
    * switching views arranges at once.
    */
+  /** true while the layout is moving (the camera holds still meanwhile) */
+  get arranging(): boolean {
+    return this.arrangeUntil > 0;
+  }
+
   private arrange(dt: number): void {
-    const CALM = 20000, ARRANGE = 1000;
+    const CALM = 20000, ARRANGE = 4000;
     const now = performance.now();
     if (!this.nodes.size) return;
     if (!this.firstData) this.firstData = now;
@@ -881,15 +904,73 @@ export class Scene {
       this.arrangeUntil = now + ARRANGE;
       this.nextArrange = now + ARRANGE + (warmup ? 3000 : CALM);
       this.sim.alpha(0.7);
+      this.tickAcc = 0;
+      this.layoutUsers();
     }
     if (now < this.arrangeUntil) {
-      const ticks = Math.max(1, Math.min(20, Math.round(dt * 360)));
-      for (let i = 0; i < ticks && this.sim.alpha() > this.sim.alphaMin(); i++) this.sim.tick();
+      // ~360 ticks spread over the window: slow, calm motion
+      this.tickAcc += dt * (360000 / ARRANGE);
+      for (; this.tickAcc >= 1 && this.sim.alpha() > this.sim.alphaMin(); this.tickAcc--) this.sim.tick();
+      // users glide to their places in the column
+      const k = Math.min(1, dt * 1.6);
+      for (const n of this.nodes.values()) {
+        const slot = this.userSlots.get(n.id);
+        if (!slot || n.kind !== 'user') continue;
+        n.x += (slot[0] - n.x) * k;
+        n.y += (slot[1] - n.y) * k;
+      }
     } else if (this.arrangeUntil) {
       // window over: stop dead, nothing drifts during the calm
-      for (const n of this.nodes.values()) n.vx = n.vy = 0;
+      for (const n of this.nodes.values()) {
+        n.vx = n.vy = 0;
+        const slot = this.userSlots.get(n.id);
+        if (slot && n.kind === 'user') [n.x, n.y] = slot;
+      }
       this.arrangeUntil = 0;
     }
+  }
+
+  /**
+   * Logstalgia-style users column: to the left of the graph, one row per user in order of arrival,
+   * centred on the graph; more than USERS_PER_COLUMN wrap into further columns to the left.
+   */
+  private layoutUsers(): void {
+    const users = [...this.nodes.values()].filter((n) => n.kind === 'user').sort((a, b) => a.since - b.since);
+    const others = [...this.nodes.values()].filter((n) => n.kind !== 'user');
+    this.userSlots.clear();
+    if (!users.length) return;
+    let minX = 0, y0 = 0, y1 = 0;
+    if (others.length) {
+      minX = Math.min(...others.map((n) => n.x - n.r - (n.group.length ? 40 + n.group.length * 28 : 0)));
+      y0 = Math.min(...others.map((n) => n.y));
+      y1 = Math.max(...others.map((n) => n.y));
+    }
+    const x0 = minX - (this.mode.endpoints ? 300 : 240);
+    const cy = (y0 + y1) / 2;
+    users.forEach((n, i) => {
+      const col = Math.floor(i / USERS_PER_COLUMN), row = i % USERS_PER_COLUMN;
+      const inCol = Math.min(USERS_PER_COLUMN, users.length - col * USERS_PER_COLUMN);
+      this.userSlots.set(n.id, [x0 - col * USER_COLUMN_GAP, cy + (row - (inCol - 1) / 2) * USER_ROW_GAP]);
+    });
+    this.userColumn = { x: x0, cy };
+  }
+
+  /** where a newly arrived user stands until the next arrangement: below the last one */
+  private nextUserSlot(): Vec2 {
+    let maxY = -Infinity, x = this.userColumn?.x;
+    for (const n of this.nodes.values()) {
+      if (n.kind !== 'user') continue;
+      if (n.y > maxY) {
+        maxY = n.y;
+        x ??= n.x;
+      }
+    }
+    if (x === undefined) {
+      const others = [...this.nodes.values()];
+      x = (others.length ? Math.min(...others.map((n) => n.x - n.r)) : 0) - 240;
+      return [x, this.userColumn?.cy ?? 0];
+    }
+    return [x, maxY === -Infinity ? this.userColumn?.cy ?? 0 : maxY + USER_ROW_GAP];
   }
 
   bounds(): { x0: number; y0: number; x1: number; y1: number } | null {
@@ -1236,8 +1317,9 @@ export class Scene {
       let col = [0.16 + 0.84 * errf, 0.24 - 0.14 * errf, 0.42 - 0.3 * errf];
       if (this.hoverEdge === e.key) col = col.map((c) => c * 2.2);
       const user = a.level === 'user';
-      const alpha = Math.min(a.alpha, b.alpha) * (lit ? 1 : 0.15) * (focusId && lit ? 1.6 : 1) * (user ? 0.5 : 1);
-      const width = user ? 0.8 : 1.2 + 2.4 * Math.log10(1 + e.rate * 2);
+      // edges stay in the background: thin and faint, the balls are the show
+      const alpha = Math.min(a.alpha, b.alpha) * (lit ? 0.5 : 0.1) * (focusId && lit ? 1.8 : 1) * (user ? 0.5 : 1);
+      const width = user ? 0.5 : 0.6 + 1.2 * Math.log10(1 + e.rate * 2);
       const flow = Math.min(1, 0.15 + e.rate / 6);
       for (let i = 0; i < SAMPLES - 1; i++) {
         o.edges.push(e.pts[i * 2], e.pts[i * 2 + 1], e.pts[i * 2 + 2], e.pts[i * 2 + 3],

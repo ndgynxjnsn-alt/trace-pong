@@ -217,7 +217,8 @@ class TracePong {
     this.hud.update(now);
     // nothing to show yet: keep the loading screen and draw the background at a few fps only
     if (!scene.hasData && this.idleFrames++ % 8 !== 0) return;
-    if (this.cam.auto) this.fit(Math.min(1, dt * 2.5));
+    // the camera holds still while the layout re-arranges, then settles on the new picture
+    if (this.cam.auto && !scene.arranging) this.fit(Math.min(1, dt * 1.5));
     scene.build();
     const s = scene.out;
     if (!this.lost) this.renderer.render({
