@@ -12,6 +12,8 @@ export const HTML = `
     <button data-act="full" title="Full screen (Shift+F)"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"/></svg></button>
   </div>
   <div class="tp-error"></div>
+  <div class="tp-loading"><div class="tp-spinner"></div><div class="tp-loading-msg">connecting…</div></div>
+  <div class="tp-lost" hidden><h3>The GPU device was lost</h3><p class="tp-lost-msg"></p><button class="tp-restart">Restart renderer</button></div>
   <div class="tp-foot"><span class="tp-fps"></span><span><kbd>H</kbd> help</span></div>
   <div class="tp-tip" hidden></div>
   <div class="tp-toast"></div>
@@ -31,6 +33,12 @@ export const HTML = `
       <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>latency stretch (how long balls are held)</td></tr>
       <tr><td><kbd>B</kbd> <kbd>L</kbd> <kbd>F</kbd></td><td>bloom / labels / fit</td></tr>
     </table>
+    <h4>View</h4>
+    <div class="tp-toggles">
+      <button data-view="endpoints"><i></i><span>Endpoints as nodes, grouped by service; databases by server › database › table</span><kbd>E</kbd></button>
+      <button data-view="userNames"><i></i><span>Show user names instead of user ids</span><kbd>U</kbd></button>
+      <button data-view="radial"><i></i><span>Radial layout (off: left to right)</span><kbd>R</kbd></button>
+    </div>
     <p class="hint">Keys work while the panel has focus (click it). Data source, filters and defaults are in the panel options.</p>
   </div>
   <div class="tp-nogpu" hidden><h3>trace-pong needs WebGPU</h3><p class="tp-nogpu-msg"></p>
@@ -92,5 +100,31 @@ export const CSS = `
 .tp-root .tp-toast.show { opacity: 1; transform: translateX(-50%); }
 .tp-root .tp-nogpu { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; padding: 20px;
   background: #05060b; z-index: 20; }
+.tp-root .tp-help h4 { margin: 14px 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--tp-dim); }
+.tp-root .tp-toggles { display: flex; flex-direction: column; gap: 4px; }
+.tp-root .tp-toggles button { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 8px; cursor: pointer;
+  background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); color: #dfe6f2; font: 12px Inter, system-ui, sans-serif; text-align: left; }
+.tp-root .tp-toggles button:hover { background: rgba(255,255,255,0.07); }
+.tp-root .tp-toggles button span { flex: 1; }
+.tp-root .tp-toggles i { position: relative; flex: none; width: 26px; height: 14px; border-radius: 7px; background: rgba(255,255,255,0.15); transition: background 0.2s; }
+.tp-root .tp-toggles i::after { content: ""; position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%; background: #dfe6f2; transition: left 0.2s; }
+.tp-root .tp-toggles button.on i { background: #00b8d4; }
+.tp-root .tp-toggles button.on i::after { left: 14px; }
+.tp-root .tp-who { margin: -2px 0 8px; display: flex; flex-direction: column; gap: 1px; font-size: 11px; color: var(--tp-dim); }
+.tp-root .tp-tip .who, .tp-root .tp-tip .path { margin: -2px 0 8px; display: flex; flex-direction: column; gap: 1px; font-size: 11px; color: var(--tp-dim); }
+.tp-root .tp-tip .who b { color: #dfe6f2; font-size: 12px; }
+.tp-root .tp-tip .who code { font: 10px var(--tp-mono); color: #00e5ff; word-break: break-all; }
+.tp-root .tp-loading { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 14px;
+  pointer-events: none; color: var(--tp-dim); font: 12px var(--tp-mono); transition: opacity 0.4s; }
+.tp-root .tp-loading.done { opacity: 0; }
+.tp-root .tp-spinner { width: 34px; height: 34px; border-radius: 50%; border: 2px solid rgba(0, 229, 255, 0.15);
+  border-top-color: #00e5ff; box-shadow: 0 0 18px rgba(0, 229, 255, 0.25); animation: tp-spin 0.9s linear infinite; }
+@keyframes tp-spin { to { transform: rotate(360deg); } }
+.tp-root .tp-lost { position: absolute; top: 46px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 12px;
+  padding: 8px 14px; border-radius: 10px; background: rgba(40, 6, 12, 0.85); border: 1px solid rgba(255, 77, 94, 0.5); z-index: 20; font-size: 12px; }
+.tp-root .tp-lost h3 { margin: 0; font-size: 12px; color: #ffd6db; }
+.tp-root .tp-lost p { margin: 0; color: var(--tp-dim); font: 11px var(--tp-mono); max-width: 360px; }
+.tp-root .tp-lost button { padding: 6px 14px; border-radius: 8px; cursor: pointer; border: 1px solid rgba(0, 229, 255, 0.5);
+  background: rgba(0, 229, 255, 0.1); color: #dfe6f2; font: 600 12px Inter, system-ui, sans-serif; }
 .tp-root [hidden] { display: none !important; }
 `;

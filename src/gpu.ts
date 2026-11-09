@@ -33,6 +33,9 @@ export interface Frame {
   overCount: number;
   heat: Float32Array<ArrayBuffer>;
   heatCount: number;
+  /** group outlines: triangle list, 8 floats per vertex */
+  hulls: Float32Array<ArrayBuffer>;
+  hullCount: number;
   sparks: Float32Array<ArrayBuffer>;
   sparkCount: number;
 }
@@ -48,15 +51,28 @@ export class Renderer {
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
     if (!adapter) throw new Error('No WebGPU adapter found.');
     const device = await adapter.requestDevice();
+    const r = new Renderer(device, canvas);
     device.lost.then((info) => {
-      if (info.reason !== 'destroyed') console.error('WebGPU device lost:', info.message);
+      if (info.reason === 'destroyed') return;
+      console.error('WebGPU device lost:', info.message);
+      r.onLost?.(info.message || 'unknown reason');
     });
-    device.addEventListener('uncapturederror', (e) => console.error('WebGPU:', e.error.message));
-    return new Renderer(device, canvas);
+    // log validation errors once each instead of every frame
+    const seen = new Set<string>();
+    device.addEventListener('uncapturederror', (e) => {
+      const msg = e.error.message;
+      if (seen.size < 20 && !seen.has(msg)) {
+        seen.add(msg);
+        console.error('WebGPU:', msg);
+      }
+    });
+    return r;
   }
 
   readonly device: GPUDevice;
   bloomOn = true;
+  /** called when the GPU device is lost (driver reset, GPU process crash, ...) */
+  onLost: ((message: string) => void) | null = null;
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: GPUCanvasContext;
   private readonly format: GPUTextureFormat;
@@ -72,6 +88,7 @@ export class Renderer {
 
   private readonly pBg: GPURenderPipeline;
   private readonly pEdges: GPURenderPipeline;
+  private readonly pHulls: GPURenderPipeline;
   private readonly pNodes: GPURenderPipeline;
   private readonly pSprites: GPURenderPipeline;
   private readonly pSparks: GPURenderPipeline;
@@ -80,6 +97,7 @@ export class Renderer {
   private readonly pUp: GPURenderPipeline;
   private readonly pComp: GPURenderPipeline;
   private readonly bgEdges: GPUBindGroup;
+  private readonly bgHulls: GPUBindGroup;
   private readonly bgNodes: GPUBindGroup;
   private readonly bgSprites: GPUBindGroup;
   private readonly bgBg: GPUBindGroup;
@@ -129,6 +147,19 @@ export class Renderer {
 
     this.pBg = scenePipe(S.background, 0);
     this.pEdges = scenePipe(S.edges, 3, premul);
+    const hmod = mod(S.common + S.hulls);
+    this.pHulls = d.createRenderPipeline({
+      layout: 'auto',
+      vertex: {
+        module: hmod, entryPoint: 'vs',
+        buffers: [{
+          arrayStride: 32, stepMode: 'vertex',
+          attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x4' }, { shaderLocation: 1, offset: 16, format: 'float32x4' }],
+        }],
+      },
+      fragment: { module: hmod, entryPoint: 'fs', targets: [{ format: HDR, blend: premul }] },
+      primitive: { topology: 'triangle-list' },
+    });
     this.pNodes = scenePipe(S.nodes, 4, premul);
     this.pSprites = scenePipe(S.sprites, 2, premul);
     this.pSparks = scenePipe(S.sparksRender, 0, premul);
@@ -157,6 +188,7 @@ export class Renderer {
       entries: [{ binding: 0, resource: { buffer: this.globals } }],
     });
     this.bgEdges = g(this.pEdges);
+    this.bgHulls = g(this.pHulls);
     this.bgNodes = g(this.pNodes);
     this.bgSprites = g(this.pSprites);
     this.bgBg = d.createBindGroup({
@@ -282,6 +314,7 @@ export class Renderer {
     const nb = this.upload('nodes', f.nodes, f.nodeCount, 16);
     const ub = this.upload('under', f.under, f.underCount, 8);
     const ob = this.upload('over', f.over, f.overCount, 8);
+    const hb = this.upload('hulls', f.hulls, f.hullCount, 8);
 
     const enc = d.createCommandEncoder();
     const cp = enc.beginComputePass();
@@ -303,6 +336,12 @@ export class Renderer {
       rp.setVertexBuffer(0, buf);
       rp.draw(6, count);
     };
+    if (f.hullCount) {
+      rp.setPipeline(this.pHulls);
+      rp.setBindGroup(0, this.bgHulls);
+      rp.setVertexBuffer(0, hb);
+      rp.draw(f.hullCount);
+    }
     instanced(this.pEdges, this.bgEdges, eb, f.edgeCount);
     instanced(this.pSprites, this.bgSprites, ub, f.underCount);
     instanced(this.pNodes, this.bgNodes, nb, f.nodeCount);

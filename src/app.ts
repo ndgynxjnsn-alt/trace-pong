@@ -7,7 +7,7 @@ import { SimSource } from './sim';
 import { TempoSource } from './tempo';
 import { Sfx } from './audio';
 import { CSS, HTML } from './ui';
-import type { Camera, Env, Severity, Source, ViewOptions } from './types';
+import type { Camera, Env, Severity, Source, ViewMode, ViewOptions } from './types';
 
 export interface TracePongHandle {
   setOptions(options: ViewOptions): void;
@@ -87,8 +87,13 @@ class TracePong {
   private readonly help: HTMLElement;
   private readonly soundBtn: HTMLElement;
 
-  constructor(private readonly root: HTMLElement, private readonly renderer: Renderer, private readonly env: Env, options: ViewOptions) {
+  private mode: ViewMode = loadViewMode();
+  private idleFrames = 0;
+  private lost = false;
+
+  constructor(private readonly root: HTMLElement, private renderer: Renderer, private readonly env: Env, options: ViewOptions) {
     this.o = { ...options };
+    this.watchDevice();
     this.text = el<HTMLCanvasElement>(root, 'text');
     this.tip = el(root, 'tip');
     this.help = el(root, 'help');
@@ -96,7 +101,7 @@ class TracePong {
     if (!soundBtn) throw new Error('missing sound button');
     this.soundBtn = soundBtn;
     this.overlay = new Overlay(this.text);
-    this.hud = new Hud(root, this.scene, { status: { error: null }, stop() {} });
+    this.hud = new Hud(root, this.scene, { status: { error: null, waiting: null }, stop() {} });
     this.apply();
 
     const ro = new ResizeObserver(() => this.resize());
@@ -105,6 +110,7 @@ class TracePong {
     this.resize();
     this.bindInput();
     this.restoreSound();
+    this.syncToggles();
 
     let last = performance.now(), fpsAcc = 0, fpsN = 0;
     const fpsEl = el(root, 'fps');
@@ -123,6 +129,37 @@ class TracePong {
       this.raf = requestAnimationFrame(frame);
     };
     this.raf = requestAnimationFrame(frame);
+  }
+
+  /**
+   * On device loss: stop using the dead device (labels, tooltips and data keep going), try one
+   * automatic restart, then offer a button.
+   */
+  private watchDevice(): void {
+    this.renderer.onLost = (msg) => {
+      if (this.destroyed) return;
+      this.lost = true;
+      el(this.root, 'lost-msg').textContent = msg;
+      if (this.autoRestarts++ < 1) setTimeout(() => void this.restartRenderer(), 1000);
+      else el(this.root, 'lost').hidden = false;
+    };
+  }
+
+  private autoRestarts = 0;
+
+  private async restartRenderer(): Promise<void> {
+    try {
+      const r = await Renderer.create(el<HTMLCanvasElement>(this.root, 'gpu'));
+      this.renderer = r;
+      this.watchDevice();
+      this.apply();
+      this.resize();
+      this.lost = false;
+      el(this.root, 'lost').hidden = true;
+    } catch (e) {
+      el(this.root, 'lost-msg').textContent = e instanceof Error ? e.message : String(e);
+      el(this.root, 'lost').hidden = false;
+    }
   }
 
   setOptions(next: ViewOptions): void {
@@ -153,6 +190,7 @@ class TracePong {
       scene.speed = old.speed;
       scene.stretch = old.stretch;
       scene.paused = old.paused;
+      scene.mode = { ...this.mode };
       scene.sfx = (sev: Severity, wx: number) => this.sfx.play(sev, ((wx - this.cam.x) * this.cam.zoom) / Math.max(1, this.W / 2));
       this.scene = scene;
       this.source = o.mode === 'sim' ? new SimSource(scene) : new TempoSource(scene, this.env, o);
@@ -176,21 +214,56 @@ class TracePong {
   private frame(dt: number, now: number): void {
     const scene = this.scene;
     scene.update(Date.now(), dt);
+    this.hud.update(now);
+    // nothing to show yet: keep the loading screen and draw the background at a few fps only
+    if (!scene.hasData && this.idleFrames++ % 8 !== 0) return;
     if (this.cam.auto) this.fit(Math.min(1, dt * 2.5));
     scene.build();
     const s = scene.out;
-    this.renderer.render({
+    if (!this.lost) this.renderer.render({
       cam: this.cam, dpr: this.dpr, time: scene.time, dt: scene.paused ? 0 : dt, dim: 0,
       nodes: s.nodes.data, nodeCount: s.nodes.count,
       edges: s.edges.data, edgeCount: s.edges.count,
       under: s.under.data, underCount: s.under.count,
       over: s.over.data, overCount: s.over.count,
       heat: s.heat.data, heatCount: s.heat.count,
+      hulls: s.hulls.data, hullCount: s.hulls.count,
       sparks: scene.sparks.data, sparkCount: scene.sparks.count,
     });
     scene.sparks.reset();
     this.overlay.draw(scene, this.cam);
-    this.hud.update(now);
+  }
+
+  // ---- view toggles (help overlay, keys E / U / R), remembered per browser ----------------
+  private setMode(m: ViewMode, msg: string): void {
+    // switching nodes or layout moves everything: follow it with the camera
+    if (m.endpoints !== this.mode.endpoints || m.layout !== this.mode.layout) this.cam.auto = true;
+    this.mode = m;
+    this.scene.setMode(m);
+    saveViewMode(m);
+    this.syncToggles();
+    this.toast(msg);
+  }
+
+  private toggle(which: 'endpoints' | 'userNames' | 'radial'): void {
+    const m = { ...this.mode };
+    if (which === 'endpoints') {
+      m.endpoints = !m.endpoints;
+      this.setMode(m, m.endpoints ? 'endpoints as nodes' : 'services as nodes');
+    } else if (which === 'userNames') {
+      m.userNames = !m.userNames;
+      this.setMode(m, m.userNames ? 'user names' : 'user ids');
+    } else {
+      m.layout = m.layout === 'radial' ? 'flow' : 'radial';
+      this.setMode(m, m.layout === 'radial' ? 'radial layout' : 'left-to-right layout');
+    }
+  }
+
+  private syncToggles(): void {
+    const on = { endpoints: this.mode.endpoints, userNames: this.mode.userNames, radial: this.mode.layout === 'radial' };
+    for (const b of this.root.querySelectorAll<HTMLElement>('.tp-toggles [data-view]')) {
+      b.classList.toggle('on', !!on[b.dataset.view as keyof typeof on]);
+    }
   }
 
   // ---- camera: auto-fit until the user takes over ------------------------------
@@ -369,6 +442,11 @@ class TracePong {
       else if (act === 'sound') this.toggleSound();
     });
     this.on(tools, 'dblclick', (e) => e.stopPropagation());
+    this.on(el(root, 'help'), 'click', (e) => {
+      const v = (e.target as Element | null)?.closest<HTMLElement>('[data-view]')?.dataset.view;
+      if (v === 'endpoints' || v === 'userNames' || v === 'radial') this.toggle(v);
+    });
+    this.on(el(root, 'restart'), 'click', () => void this.restartRenderer());
 
     // Keys only while the panel has focus, and never leak to Grafana's own shortcuts.
     this.on(root, 'keydown', (e) => {
@@ -381,6 +459,9 @@ class TracePong {
         case 'f': cam.auto = true; break;
         case 'F': this.toggleFull(); break;
         case 'm': this.toggleSound(); break;
+        case 'e': this.toggle('endpoints'); break;
+        case 'u': this.toggle('userNames'); break;
+        case 'r': this.toggle('radial'); break;
         case '+': case '=': s.speed = Math.min(4, s.speed * 1.25); this.toast(`ball speed ×${s.speed.toFixed(2)}`); break;
         case '-': s.speed = Math.max(0.25, s.speed / 1.25); this.toast(`ball speed ×${s.speed.toFixed(2)}`); break;
         case ']': s.stretch = Math.min(50, s.stretch * 1.5); this.toast(`latency stretch ×${s.stretch.toFixed(1)}`); break;
@@ -404,4 +485,27 @@ function segDist(px: number, py: number, x0: number, y0: number, x1: number, y1:
   const l = dx * dx + dy * dy || 1;
   const t = Math.max(0, Math.min(1, ((px - x0) * dx + (py - y0) * dy) / l));
   return Math.hypot(px - x0 - t * dx, py - y0 - t * dy);
+}
+
+const VIEW_KEY = 'tracepong.view';
+
+function loadViewMode(): ViewMode {
+  const m: ViewMode = { endpoints: false, userNames: false, layout: 'radial' };
+  try {
+    const v = JSON.parse(localStorage.getItem(VIEW_KEY) ?? '{}') as Partial<ViewMode>;
+    if (typeof v.endpoints === 'boolean') m.endpoints = v.endpoints;
+    if (typeof v.userNames === 'boolean') m.userNames = v.userNames;
+    if (v.layout === 'flow' || v.layout === 'radial') m.layout = v.layout;
+  } catch {
+    // storage blocked or garbage: defaults
+  }
+  return m;
+}
+
+function saveViewMode(m: ViewMode): void {
+  try {
+    localStorage.setItem(VIEW_KEY, JSON.stringify(m));
+  } catch {
+    // storage blocked
+  }
 }

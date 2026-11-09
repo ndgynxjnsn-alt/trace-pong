@@ -6,6 +6,10 @@ Every ball is one real call between two services from a recent trace. The reques
 and the response returns once the span and its own calls are done. Errors explode in red. Nodes look
 like Grafana's service graph: a health ring with mean latency and request rate inside.
 
+Logged-in users (`user.id` / `enduser.id` on the root span, as set by Faro or an OAuth backend) get a node
+each. The help screen (`H`) switches to one node per endpoint grouped by service (databases by server ›
+database › table), user names instead of ids, and a radial or left-to-right layout.
+
 ## Requirements
 
 * A browser with WebGPU (Chrome/Edge, Safari 26, Firefox with WebGPU enabled).

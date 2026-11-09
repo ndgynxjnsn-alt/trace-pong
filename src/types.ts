@@ -26,6 +26,32 @@ export interface Hop {
   k: HopKind;
   /** trace id (hex) */
   tr: string;
+  /** caller's endpoint: the server span (or frontend view) the call was made from */
+  fe?: string;
+  /** callee's endpoint: server span name, frontend view, or database table */
+  te?: string;
+  /** callee's group path for the endpoint view, e.g. ['gateway'] or ['postgres', 'users_db'] */
+  tg?: string[];
+  /** the end user, when the caller is a user (f === 'user') */
+  u?: UserInfo;
+}
+
+/** An end user, from OAuth claims that Faro or the backend put on the root span. */
+export interface UserInfo {
+  id: string;
+  /** full name, if known */
+  name?: string;
+  username?: string;
+  email?: string;
+}
+
+/** View settings toggled from the help overlay (not panel options). */
+export interface ViewMode {
+  /** one node per endpoint (and database table), grouped by service */
+  endpoints: boolean;
+  /** label user nodes with names instead of ids */
+  userNames: boolean;
+  layout: 'radial' | 'flow';
 }
 
 export interface GraphNode {
@@ -54,7 +80,11 @@ export interface Graph {
 
 /** Feeds a scene with graph updates and hops. */
 export interface Source {
-  status: { error: string | null };
+  status: {
+    error: string | null;
+    /** what we are waiting for while there is nothing to show */
+    waiting: string | null;
+  };
   stop(): void;
 }
 

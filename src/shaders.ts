@@ -145,6 +145,40 @@ struct EOut {
 `;
 
 // ---------------------------------------------------------------------------
+// Group outlines: convex hulls as triangle fans from the centre. Each vertex carries its distance to
+// the hull edge of its triangle (0 on the edge), which interpolates to the exact distance inside,
+// so the rim stays a few pixels wide at any zoom.
+// ---------------------------------------------------------------------------
+export const hulls = /* wgsl */`
+struct HIn {
+  @location(0) a: vec4f,  // x, y, distance to the edge (world), -
+  @location(1) c: vec4f,  // rgb, alpha
+};
+struct HOut {
+  @builtin(position) pos: vec4f,
+  @location(0) d: f32,
+  @location(1) c: vec4f,
+};
+
+@vertex fn vs(v: HIn) -> HOut {
+  var o: HOut;
+  o.pos = toClip(v.a.xy);
+  o.d = v.a.z;
+  o.c = v.c;
+  return o;
+}
+
+@fragment fn fs(in: HOut) -> @location(0) vec4f {
+  let px = in.d * G.view.z;    // screen pixels to the outline
+  let rim = exp(-px * 0.8) * 0.9 + exp(-px * 0.08) * 0.12;
+  let fill = 0.035;
+  let k = (rim + fill) * in.c.a;
+  // mostly additive light, with a touch of occlusion so the group reads as a surface
+  return vec4f(in.c.rgb * k * 0.6, fill * in.c.a * 2.0);
+}
+`;
+
+// ---------------------------------------------------------------------------
 // Nodes: Tempo-style ring (green ok / red error arc), dark core, hue glow
 // ---------------------------------------------------------------------------
 export const nodes = /* wgsl */`

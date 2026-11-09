@@ -7,8 +7,19 @@ traffic, as promviz/Vizceral do. Unlike those, every ball is a **real call from 
 ![trace-pong](docs/screenshot.png)
 
 * **Nodes** are services, as in Grafana's service graph: a ring with a green/red health arc, mean
-  latency and request rate inside. Databases are blue, third-party APIs are purple and dashed,
-  and incoming users are on the far left. Busy nodes heat up and glow.
+  latency and request rate inside. Databases are blue, third-party APIs are purple and dashed.
+  Busy nodes heat up and glow.
+* **Users** are nodes of their own, as in Logstalgia: every logged-in user (OAuth claims that Faro or the
+  backend put on the trace's root span: `user.id` / `enduser.id`, `user.full_name`, `user.name`,
+  `user.email`) is a small node in the **USERS** group, labelled with the user id, or the name when that
+  is switched on. A user's label lights up while they are clicking around; people come and go.
+* **Endpoint view** (help screen, <kbd>E</kbd>): one node per endpoint, grouped by service, e.g.
+  `GET /api/health` and `GET /user/info` inside **ACCOUNT**. Databases split into server › database ›
+  table (`postgres › users_db › user_info`) from `server.address`, `db.namespace`/`db.name` and
+  `db.collection.name`/`db.sql.table` (or the table in the statement); frontends by Faro view.
+* **Layout**: a force simulation (d3-force) arranges the graph, **radially** around the users by default
+  (each subtree of the call graph gets its slice of the circle), or **left to right** (<kbd>R</kbd>).
+  Groups are drawn as glowing outlines and keep apart from each other.
 * **Balls** are hops (one client→server call) taken from fresh Tempo traces. The request flies to the
   callee and bounces off its ring in a spray of sparks. The ball stays inside (orbiting) for the span's
   duration and its own downstream calls, then **bounces back** as the response. Each trace replays as a
@@ -19,7 +30,10 @@ traffic, as promviz/Vizceral do. Unlike those, every ball is a **real call from 
 * **Sound** (off by default, speaker button or <kbd>M</kbd>): synthesized space explosions, large for errors,
   medium for 4xx, distant pops for the rest. All voices share a long reverb and a compressor so they stack
   into a rumble, and a per-severity budget keeps busy graphs listenable.
-* Hover a service for its callers and callees with rate, latency and error rate.
+* Hover a node for its callers and callees with rate, latency and error rate; users show name, email and id.
+  Endpoint and user rates are estimated from the sampled traces, scaled to the service graph's totals.
+* Until there is data, a loading screen says what it is waiting for (data sources unreachable, no traces
+  matching the filter, …).
 * It is an ordinary panel: add it to any dashboard, pick the Tempo data source, filter with TraceQL.
 
 ## How it works
@@ -73,12 +87,16 @@ TypeScript (strict) under [src/](src/), no runtime dependencies besides what Gra
 |---|---|
 | `module.tsx` | the panel: options, data source resolution, React wrapper |
 | `app.ts` | one instance in a panel element: input, camera, frame loop |
-| `scene.ts` | layout, playback clock, ball scheduling, effects, GPU instance data |
+| `scene.ts` | nodes per view (services, endpoints, users), force layout, groups, playback clock, ball scheduling, effects, GPU instance data |
 | `gpu.ts`, `shaders.ts` | WebGPU pipelines and WGSL |
 | `tempo.ts` | live data: PromQL service graph, Tempo search and span pairing |
 | `sim.ts` | the built-in simulator |
 | `overlay.ts`, `hud.ts`, `ui.ts` | 2D labels, tooltip/clock, panel DOM and CSS |
 | `audio.ts` | synthesized explosions |
+
+The layout is a d3-force simulation with links, many-body repulsion, collision, a radial (or column) force per
+call-graph depth, a target angle per subtree, and custom forces that hold groups together and keep sibling
+groups apart.
 
 [build.mjs](build.mjs) bundles `src/module.tsx` with esbuild into one AMD `module.js` (the format Grafana
 loads plugins in; React, `@grafana/data`, `@grafana/runtime` and `rxjs` come from Grafana), writes
@@ -101,7 +119,7 @@ The plugin is unsigned, so Grafana must be told to load it. Build the ZIP first 
 otherwise a `node:22` container):
 
 ```bash
-scripts/build.sh                     # type-check, build -> dist/tracepong-live-panel-1.3.0.zip
+scripts/build.sh                     # type-check, build -> dist/tracepong-live-panel-1.4.0.zip
 ```
 
 * **Any Grafana ≥ 11** (tested with 13.1): unzip into the plugin folder and allow the unsigned plugin:
@@ -114,7 +132,7 @@ scripts/build.sh                     # type-check, build -> dist/tracepong-live-
   which unpacks every mounted ZIP before starting Grafana. Copy the `grafana` service from
   [docker-compose.yml](docker-compose.yml).
 * **From a URL** (e.g. a release asset):
-  `GF_PLUGINS_PREINSTALL_SYNC=tracepong-live-panel@1.3.0@https://…/tracepong-live-panel-1.3.0.zip`.
+  `GF_PLUGINS_PREINSTALL_SYNC=tracepong-live-panel@1.4.0@https://…/tracepong-live-panel-1.4.0.zip`.
 
 Then add a visualization of type **trace-pong** to a dashboard. The panel title is the title.
 
@@ -150,13 +168,16 @@ Click a service to pin focus. Keys work while the panel has focus: <kbd>space</k
 stay inside a service), <kbd>B</kbd>/<kbd>L</kbd>/<kbd>F</kbd> toggle bloom and labels or re-fit, <kbd>M</kbd> toggles sound, and
 <kbd>H</kbd> shows help.
 
+The help screen also has the **view** switches, remembered per browser: endpoints as nodes (<kbd>E</kbd>),
+user names instead of ids (<kbd>U</kbd>), radial or left-to-right layout (<kbd>R</kbd>).
+
 ## Run the demo
 
 ```bash
 # 1. the LGTM stack (the repo one level up, single node); its own Grafana is not needed
 (cd .. && docker compose up -d alloy tempo mimir loki)
 
-# 2. the plugin ZIP, the demo shop (14 services + load generator) and a Grafana with the panel
+# 2. the plugin ZIP, the demo shop (15 services + Faro-like frontend) and a Grafana with the panel
 scripts/build.sh
 docker compose up -d --build
 
@@ -169,13 +190,20 @@ After changing `src/`, run `scripts/build.sh && docker compose restart grafana` 
 
 ## The demo shop (`mesh/`)
 
-There is one small Python image, and `SERVICE=<name>` picks the role from `mesh/topology.py`. There are 14 instrumented
-services (gateway, auth, catalog, search, recommendation, cart, pricing, currency, checkout, inventory,
-payment, fraud, shipping, notification) that call each other over HTTP. They use uninstrumented
-dependencies that Tempo turns into virtual nodes: `users-db`, `catalog-db`, `inventory-db`, `redis`,
-`elasticsearch`, `stripe-api`, `dhl-api`, `ecb-rates-api` and `smtp-relay`. A simulated Kafka hop
-(producer → consumer spans) runs from checkout to notification. Spans are created by hand with the
+There is one small Python image, and `SERVICE=<name>` picks the role from `mesh/topology.py`. There are 15 instrumented
+services (gateway, account, auth, catalog, search, recommendation, cart, pricing, currency, checkout,
+inventory, payment, fraud, shipping, notification) that call each other over HTTP. The gateway has 12 routes
+and `account` has 5 endpoints (`GET /user/info`, `GET /user/orders`, `PUT /user/settings`,
+`DELETE /user/sessions`, `GET /api/health`). They use uninstrumented dependencies that Tempo turns into
+virtual nodes: a `postgres` server with `users_db`, `catalog_db`, `inventory_db` and `orders_db` (several
+tables each), `redis`, `elasticsearch`, `stripe-api`, `dhl-api`, `ecb-rates-api` and `smtp-relay`. A simulated
+Kafka hop (producer → consumer spans) runs from checkout to notification. Spans are created by hand with the
 OpenTelemetry SDK, so their shapes match exactly what the service-graph processor pairs, and they are exported over OTLP to Alloy.
+
+The load generator plays **shop-web**, a browser app instrumented with Grafana Faro: each request is a root
+CLIENT span with Faro's user and session attributes and view name, made by one of a rotating set of fake
+OAuth users ([mesh/users.py](mesh/users.py): Google, Auth0, GitHub and Okta style ids, names, emails), and
+carries the user's JWT to the gateway, which reads the claims and tags its server span with the user id.
 
 The load generator's traffic varies over time, with occasional flash crowds. Every 4 minutes one service
 has a 70 s **incident** (errors or latency), computed from wall-clock time so all containers agree.
