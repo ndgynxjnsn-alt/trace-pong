@@ -19,7 +19,11 @@ traffic, as promviz/Vizceral do. Unlike those, every ball is a **real call from 
   `db.collection.name`/`db.sql.table` (or the table in the statement); frontends by Faro view.
 * **Layout**: a force simulation (d3-force) arranges the graph, **radially** around the users by default
   (each subtree of the call graph gets its slice of the circle), or **left to right** (<kbd>R</kbd>).
-  Groups are drawn as glowing outlines and keep apart from each other.
+  Groups are drawn as glowing outlines and keep apart from each other. Database servers attract each
+  other, so the data layer forms one cluster; a server with several databases is a bubble of its
+  databases (in the endpoint view: server › database › table, nested).
+* **Calm**: the layout holds still for 20 s, re-arranges for 1 s, holds still again. Newcomers (a user
+  logging in, a new endpoint) just appear in a free spot next to where they belong.
 * **Balls** are hops (one client→server call) taken from fresh Tempo traces. The request flies to the
   callee and bounces off its ring in a spray of sparks. The ball stays inside (orbiting) for the span's
   duration and its own downstream calls, then **bounces back** as the response. Each trace replays as a
@@ -119,7 +123,7 @@ The plugin is unsigned, so Grafana must be told to load it. Build the ZIP first 
 otherwise a `node:22` container):
 
 ```bash
-scripts/build.sh                     # type-check, build -> dist/tracepong-live-panel-1.4.0.zip
+scripts/build.sh                     # type-check, build -> dist/tracepong-live-panel-1.5.0.zip
 ```
 
 * **Any Grafana ≥ 11** (tested with 13.1): unzip into the plugin folder and allow the unsigned plugin:
@@ -132,7 +136,7 @@ scripts/build.sh                     # type-check, build -> dist/tracepong-live-
   which unpacks every mounted ZIP before starting Grafana. Copy the `grafana` service from
   [docker-compose.yml](docker-compose.yml).
 * **From a URL** (e.g. a release asset):
-  `GF_PLUGINS_PREINSTALL_SYNC=tracepong-live-panel@1.4.0@https://…/tracepong-live-panel-1.4.0.zip`.
+  `GF_PLUGINS_PREINSTALL_SYNC=tracepong-live-panel@1.5.0@https://…/tracepong-live-panel-1.5.0.zip`.
 
 Then add a visualization of type **trace-pong** to a dashboard. The panel title is the title.
 

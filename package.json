@@ -1,6 +1,6 @@
 {
   "name": "tracepong-live-panel",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Live service traffic replayed from Tempo traces on a service graph, drawn with WebGPU (Grafana panel plugin)",
   "private": true,
   "type": "module",

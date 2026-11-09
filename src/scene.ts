@@ -351,11 +351,19 @@ export class Scene {
   private lastIdentifiedUser = -Infinity;
   private lastAnonUser = -Infinity;
   private topologyDirty = true;
+  /** calm/arrange rhythm: the layout only moves inside short windows */
+  private arrangeUntil = 0;
+  private nextArrange = 0;
+  private arrangeSoon = false;
+  private firstData = 0;
+  /** database servers split into databases in the service view */
+  private readonly dbServers = new Set<string>();
   private readonly sim: Simulation<SceneNode, Link>;
   private groupMembers = new Map<string, SceneNode[]>();
 
   constructor() {
-    this.sim = forceSimulation<SceneNode, Link>().stop().alphaDecay(0.025).velocityDecay(0.38);
+    // ticks only run inside the 1 s arrange windows (~360 ticks from alpha 0.7 down to ~0.01)
+    this.sim = forceSimulation<SceneNode, Link>().stop().alphaDecay(0.012).alphaMin(0.005).velocityDecay(0.38);
   }
 
   get hasData(): boolean {
@@ -371,7 +379,7 @@ export class Scene {
     else if (relayout) {
       if (m.layout === 'radial') this.unfold();
       this.topologyDirty = true;
-      this.sim.alpha(1);
+      this.arrangeSoon = true;
     }
   }
 
@@ -421,7 +429,7 @@ export class Scene {
     }
     for (const n of this.nodes.values()) seed(n);
     this.topologyDirty = true;
-    this.sim.alpha(1);
+    this.arrangeSoon = true;
   }
 
   // ---- nodes and edges -----------------------------------------------------
@@ -446,6 +454,17 @@ export class Scene {
       const g = h.tg?.length ? h.tg : [h.to];
       return { id: [...g, h.te].join(SEP), label: h.te, kind, level: 'endpoint', group: g, owner: g[0] };
     }
+    // service view: a database server with databases is a bubble with one node per database
+    // (postgres: users_db, orders_db, ...); Tempo's own node for the server is replaced by it
+    if (h.k === 'db' && h.tg && h.tg.length > 1) {
+      const [server, db] = h.tg;
+      if (!this.dbServers.has(server)) {
+        this.dbServers.add(server);
+        const old = this.nodes.get(server);
+        if (old && !old.group.length) old.dying = true;
+      }
+      return { id: `${server}${SEP}${db}`, label: db, kind, level: 'service', group: [server], owner: server };
+    }
     return { id: h.to, label: h.to, kind, level: 'service', group: [], owner: h.to };
   }
 
@@ -457,6 +476,13 @@ export class Scene {
         this.recolor(n);
       }
       if (spec.user) n.user = spec.user;
+      if (spec.group.length > n.group.length) {
+        // learned which server a database belongs to
+        n.group = spec.group;
+        n.owner = spec.owner;
+        this.recolor(n);
+        this.topologyDirty = true;
+      }
       n.lastSeen = performance.now();
       n.dying = false;
       return n;
@@ -480,11 +506,14 @@ export class Scene {
       x = Math.cos(ang) * rad;
       y = Math.sin(ang) * rad;
     }
+    const r0 = spec.level === 'user' ? 9 : spec.level === 'endpoint' ? 16 : 26;
+    // newcomers just appear: in a free spot near where they belong, without moving anybody
+    [x, y] = this.freeSpot(x, y, r0, spec.level === 'user' ? 14 : 30);
     n = {
       ...spec,
       x,
       y,
-      r: spec.level === 'user' ? 9 : spec.level === 'endpoint' ? 16 : 26,
+      r: r0,
       rgb, lin: toLin(rgb), css: css(rgb),
       pulse: 0, heat: 0, flash: 0, shake: 0, lastRing: 0, active: 0,
       rate: 0, errRate: 0, mean: null, outRate: 0,
@@ -494,6 +523,23 @@ export class Scene {
     this.nodes.set(spec.id, n);
     this.topologyDirty = true;
     return n;
+  }
+
+  private freeSpot(x: number, y: number, r: number, gap: number): Vec2 {
+    for (let i = 0; i < 40; i++) {
+      // golden-angle spiral around the wanted spot
+      const d = i === 0 ? 0 : 18 * Math.sqrt(i) * (1 + r / 30), a = i * 2.39996;
+      const cx = x + Math.cos(a) * d, cy = y + Math.sin(a) * d;
+      let ok = true;
+      for (const o of this.nodes.values()) {
+        if (Math.hypot(o.x - cx, o.y - cy) < r + o.r + gap) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) return [cx, cy];
+    }
+    return [x, y];
   }
 
   private colorOf(spec: NodeSpec): Rgb {
@@ -553,6 +599,7 @@ export class Scene {
     const hideUser = now - this.lastIdentifiedUser < 90000 && now - this.lastAnonUser > 90000;
     for (const ge of g.edges) {
       if (hideUser && ge.source === 'user') continue;
+      if (this.dbServers.has(ge.target)) continue;   // shown as its databases instead
       const spec = (id: string): NodeSpec => ({
         id, label: id === 'user' ? 'USERS' : id, kind: id === 'user' ? 'user' : this.kindOf(id),
         level: 'service', group: [], owner: id,
@@ -706,9 +753,9 @@ export class Scene {
       .distance((l) => (l.same ? 60 : flow ? COL * 0.7 : RING * 0.75))
       .strength((l) => (l.same ? 0.4 : 0.06)));
     sim.force('charge', forceManyBody<SceneNode>()
-      .strength((n) => (n.level === 'user' ? -50 : n.level === 'endpoint' ? -160 : -700))
+      .strength((n) => (n.level === 'user' ? -140 : n.level === 'endpoint' ? -160 : -700))
       .distanceMax(flow ? 900 : 2600));
-    sim.force('collide', forceCollide<SceneNode>((n) => n.r + (n.level === 'user' ? 9 : n.level === 'endpoint' ? 18 : 30))
+    sim.force('collide', forceCollide<SceneNode>((n) => n.r + (n.level === 'user' ? 24 : n.level === 'endpoint' ? 18 : 30))
       .strength(0.9).iterations(2));
     const sector = this.sectors(rank);
     const sec = (n: SceneNode) => sector.get(n.owner) ?? 0.5;
@@ -716,7 +763,7 @@ export class Scene {
       // columns by depth; the vertical order follows the call tree
       const height = Math.max(600, sector.size * (ep ? 150 : 90));
       sim.force('x', forceX<SceneNode>((n) => rankOf(n) * COL).strength(0.5));
-      sim.force('y', forceY<SceneNode>((n) => (sec(n) - 0.5) * height).strength((n) => (n.level === 'user' ? 0.05 : 0.12)));
+      sim.force('y', forceY<SceneNode>((n) => (sec(n) - 0.5) * height).strength((n) => (n.level === 'user' ? 0.05 : n.kind === 'database' ? 0.03 : 0.12)));
       sim.force('radial', null);
     } else {
       // rings by depth; each subtree gets its slice of the circle, users in the middle
@@ -725,8 +772,9 @@ export class Scene {
         return [Math.cos(a) * r, Math.sin(a) * r];
       };
       sim.force('radial', forceRadial<SceneNode>((n) => rankOf(n) * RING, 0, 0).strength(0.45));
-      sim.force('x', forceX<SceneNode>((n) => at(n)[0]).strength((n) => (rankOf(n) ? 0.12 : 0.02)));
-      sim.force('y', forceY<SceneNode>((n) => at(n)[1]).strength((n) => (rankOf(n) ? 0.12 : 0.02)));
+      const pull = (n: SceneNode) => (!rankOf(n) ? 0.02 : n.kind === 'database' ? 0.03 : 0.12);
+      sim.force('x', forceX<SceneNode>((n) => at(n)[0]).strength(pull));
+      sim.force('y', forceY<SceneNode>((n) => at(n)[1]).strength(pull));
     }
     // members of a group pull towards its centre, inner groups harder; top-level groups keep
     // their outlines apart (node collision alone lets two groups interleave)
@@ -779,11 +827,29 @@ export class Scene {
         }
       }
     };
+    // database servers attract each other (medium), so the data layer forms one cluster
+    const dbs = nodes.filter((n) => n.kind === 'database');
+    sim.force('dbCluster', (alpha: number) => {
+      if (dbs.length < 2) return;
+      let cx = 0, cy = 0;
+      for (const n of dbs) {
+        cx += n.x;
+        cy += n.y;
+      }
+      cx /= dbs.length;
+      cy /= dbs.length;
+      const k = 0.06 * alpha;
+      for (const n of dbs) {
+        n.vx = (n.vx ?? 0) + (cx - n.x) * k;
+        n.vy = (n.vy ?? 0) + (cy - n.y) * k;
+      }
+    });
     sim.force('group', (alpha: number) => {
       for (const [key, members] of groups) {
         if (members.length < 2) continue;
         const depth = key.split(SEP).length;
-        const k = (depth > 1 ? 0.35 : 0.18) * alpha;
+        // the users bubble is kept loose; inner groups (databases of a server) tight
+        const k = (key === 'users' ? 0.06 : depth > 1 ? 0.35 : 0.18) * alpha;
         let cx = 0, cy = 0;
         for (const m of members) {
           cx += m.x;
@@ -797,13 +863,39 @@ export class Scene {
         }
       }
     });
-    sim.alpha(Math.max(sim.alpha(), 0.35));
+  }
+
+  /**
+   * Tranquility: the topology stays put for CALM ms, then re-arranges for ARRANGE ms, and so on.
+   * Newcomers appear in a free spot in between. Shorter calm while the graph first fills in;
+   * switching views arranges at once.
+   */
+  private arrange(dt: number): void {
+    const CALM = 20000, ARRANGE = 1000;
+    const now = performance.now();
+    if (!this.nodes.size) return;
+    if (!this.firstData) this.firstData = now;
+    const warmup = now - this.firstData < 12000;
+    if (this.arrangeSoon || now >= this.nextArrange) {
+      this.arrangeSoon = false;
+      this.arrangeUntil = now + ARRANGE;
+      this.nextArrange = now + ARRANGE + (warmup ? 3000 : CALM);
+      this.sim.alpha(0.7);
+    }
+    if (now < this.arrangeUntil) {
+      const ticks = Math.max(1, Math.min(20, Math.round(dt * 360)));
+      for (let i = 0; i < ticks && this.sim.alpha() > this.sim.alphaMin(); i++) this.sim.tick();
+    } else if (this.arrangeUntil) {
+      // window over: stop dead, nothing drifts during the calm
+      for (const n of this.nodes.values()) n.vx = n.vy = 0;
+      this.arrangeUntil = 0;
+    }
   }
 
   bounds(): { x0: number; y0: number; x1: number; y1: number } | null {
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const n of this.nodes.values()) {
-      const pad = n.group.length ? 40 + n.group.length * 14 : 26;
+      const pad = n.group.length ? 50 + n.group.length * 30 : 26;   // room for (nested) group outlines and labels
       x0 = Math.min(x0, n.x - n.r - pad);
       x1 = Math.max(x1, n.x + n.r + pad);
       y0 = Math.min(y0, n.y - n.r - pad - 18);
@@ -1009,7 +1101,7 @@ export class Scene {
     }
     this.decayAndExpire(dt);
     if (this.topologyDirty) this.relayout();
-    if (this.sim.alpha() > this.sim.alphaMin()) this.sim.tick(this.sim.alpha() > 0.5 ? 2 : 1);
+    this.arrange(dt);
 
     // nodes: grow toward their size, decay effects
     const k = 1 - Math.exp(-dt * 4);

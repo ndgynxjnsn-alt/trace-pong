@@ -63,6 +63,8 @@ export class TempoSource implements Source {
   /** traceID -> first seen, for dedupe */
   private readonly seen = new Map<string, number>();
   private first = true;
+  /** node names in the latest service graph, to name database nodes the same way */
+  private known = new Set<string>();
   private stopped = false;
   private gt?: ReturnType<typeof setTimeout>;
   private ht?: ReturnType<typeof setTimeout>;
@@ -95,6 +97,7 @@ export class TempoSource implements Source {
     try {
       const g = await this.serviceGraph();
       if (g.nodes.length) this.graphSeen = true;
+      this.known = new Set(g.nodes.map((n) => n.id));
       this.scene.applyGraph(g);
       this.errors.graph = null;
     } catch (e) {
@@ -214,7 +217,7 @@ export class TempoSource implements Source {
         const id = ids[i++];
         try {
           const d = await this.env.get<{ trace?: OtlpTrace } & OtlpTrace>(`${this.o.tempoUrl}/api/v2/traces/${id}`);
-          hops.push(...hopsFromTrace(d.trace ?? d));
+          hops.push(...hopsFromTrace(d.trace ?? d, this.known));
         } catch {
           // a single missing trace is not worth an error message
         }
@@ -293,7 +296,7 @@ function tableFromQuery(q: string | undefined): string | undefined {
 }
 
 /** One OTLP-JSON trace -> client->server hops, the way Tempo's service graph pairs spans. */
-export function hopsFromTrace(tr: OtlpTrace): Hop[] {
+export function hopsFromTrace(tr: OtlpTrace, known: Set<string> = new Set()): Hop[] {
   const spans = new Map<string, Span>();
   const children = new Map<string, Span[]>();
   for (const rs of tr.resourceSpans ?? tr.batches ?? []) {
@@ -371,7 +374,12 @@ export function hopsFromTrace(tr: OtlpTrace): Hop[] {
         const table = str(a['db.collection.name']) ?? str(a['db.sql.table']) ?? str(a['db.mongodb.collection'])
           ?? tableFromQuery(str(a['db.query.text']) ?? str(a['db.statement']));
         const tg = db && db !== server ? [server, db] : [server];
-        emit(s.svc, String(peer), s, 'db', { fe, te: table ?? str(a['db.operation.name']) ?? str(a['db.operation']) ?? s.name, tg });
+        // name the node like Tempo's service graph does (Tempo 3 uses server.address for databases,
+        // older versions db.name): the first candidate the service graph knows, else server.address
+        const cands = ['server.address', 'peer.service', 'db.name', 'db.namespace', 'db.system', 'net.peer.name']
+          .map((k) => str(a[k])).filter((v): v is string => !!v);
+        const to = cands.find((c) => known.has(c)) ?? cands[0] ?? String(peer);
+        emit(s.svc, to, s, 'db', { fe, te: table ?? str(a['db.operation.name']) ?? str(a['db.operation']) ?? s.name, tg });
       } else {
         emit(s.svc, String(peer), s, 'ext', { fe, te: s.name, tg: [String(peer)] });
       }
