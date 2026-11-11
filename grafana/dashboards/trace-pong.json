@@ -21,6 +21,8 @@
         "labelFilter": "",
         "window": "1m",
         "maxTraces": 30,
+        "sampling": 100,
+        "rename": "# name or address = shown as\nredis = prod-redis",
         "showClock": true,
         "labels": true,
         "bloom": true,

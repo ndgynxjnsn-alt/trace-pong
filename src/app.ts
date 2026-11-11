@@ -7,6 +7,8 @@ import { SimSource } from './sim';
 import { TempoSource } from './tempo';
 import { Sfx } from './audio';
 import { CSS, HTML } from './ui';
+import { parseRenames } from './rename';
+import { debugHtml, debugReport, debugText, type FrameTimes } from './debug';
 import type { Camera, Env, Severity, Source, ViewMode, ViewOptions } from './types';
 
 export interface TracePongHandle {
@@ -17,7 +19,7 @@ export interface TracePongHandle {
 }
 
 /** options that need a fresh scene and data source when they change */
-const SOURCE_KEYS: (keyof ViewOptions)[] = ['mode', 'tempoUrl', 'promUrl', 'traceql', 'labelFilter', 'window', 'maxTraces'];
+const SOURCE_KEYS: (keyof ViewOptions)[] = ['mode', 'tempoUrl', 'promUrl', 'traceql', 'labelFilter', 'window', 'maxTraces', 'sampling', 'rename'];
 
 function injectCss(): void {
   if (document.getElementById('tracepong-css')) return;
@@ -86,10 +88,23 @@ class TracePong {
   private mode: ViewMode = loadViewMode();
   private idleFrames = 0;
   private lost = false;
+  private failure: string | null;
+  private fps = 0;
+  private readonly times: FrameTimes = { update: 0, build: 0, encode: 0, overlay: 0, interval: 16.7 };
+  /** GPU canvas resolution relative to the screen; lowered automatically while fps stays low */
+  private renderScale = 1;
+  private scaleNote = '';
+  private scaleTest: { prev: number; fpsBefore: number; wait: number } | null = null;
+  private scaleSettled = false;
+  private lowSeconds = 0;
+  private readonly debugEl: HTMLElement;
+  private debugAt = 0;
 
   constructor(private readonly root: HTMLElement, private renderer: Renderer | null, private readonly env: Env, options: ViewOptions,
     failure: string | null) {
     this.o = { ...options };
+    this.failure = failure;
+    this.debugEl = el(root, 'debug');
     if (this.renderer) this.watchDevice();
     else this.fallback(failure ?? 'WebGPU is not available');
     this.text = el<HTMLCanvasElement>(root, 'text');
@@ -110,18 +125,21 @@ class TracePong {
     this.restoreSound();
     this.syncToggles();
 
-    let last = performance.now(), fpsAcc = 0, fpsN = 0;
+    let last = performance.now(), fpsStart = last, fpsN = 0;
     const fpsEl = el(root, 'fps');
     const frame = (now: number) => {
       if (this.destroyed) return;
-      const dt = Math.min(0.05, (now - last) / 1000);
+      const real = now - last;
+      const dt = Math.min(0.05, real / 1000);
       last = now;
-      fpsAcc += dt;
+      this.times.interval += (real - this.times.interval) * 0.1;
       fpsN++;
-      if (fpsAcc > 1) {
-        fpsEl.textContent = `${Math.round(fpsN / fpsAcc)} fps`;
-        fpsAcc = 0;
+      if (now - fpsStart > 1000) {
+        this.fps = (fpsN * 1000) / (now - fpsStart);
+        fpsEl.textContent = `${Math.round(this.fps)} fps`;
+        fpsStart = now;
         fpsN = 0;
+        this.adaptScale();
       }
       this.frame(dt, now);
       this.raf = requestAnimationFrame(frame);
@@ -147,6 +165,7 @@ class TracePong {
   /** WebGPU unusable: keep going with the 2D view and say so, with a retry button */
   private fallback(msg: string): void {
     this.lost = true;
+    this.failure = msg;
     el(this.root, 'gpu').style.visibility = 'hidden';   // no stale GPU frame under the 2D view
     el(this.root, 'lost-title').textContent = 'WebGPU unavailable, simple 2D view';
     el(this.root, 'lost-msg').textContent = msg;
@@ -166,6 +185,7 @@ class TracePong {
       this.renderer = r;
       this.watchDevice();
       this.lost = false;
+      this.failure = null;
       el(this.root, 'gpu').style.visibility = '';
       this.apply();
       this.resize();
@@ -204,6 +224,7 @@ class TracePong {
       scene.stretch = old.stretch;
       scene.paused = old.paused;
       scene.mode = { ...this.mode };
+      scene.renames = parseRenames(o.rename);
       scene.sfx = (sev: Severity, wx: number) => this.sfx.play(sev, ((wx - this.cam.x) * this.cam.zoom) / Math.max(1, this.W / 2));
       this.scene = scene;
       this.source = o.mode === 'sim' ? new SimSource(scene) : new TempoSource(scene, this.env, o);
@@ -217,22 +238,43 @@ class TracePong {
   }
 
   private resize(): void {
+    const W = Math.max(1, this.root.clientWidth), H = Math.max(1, this.root.clientHeight);
+    if (W !== this.W || H !== this.H) {
+      // new size (e.g. full screen): start over at full resolution
+      this.renderScale = 1;
+      this.scaleNote = '';
+      this.scaleTest = null;
+      this.scaleSettled = false;
+      this.lowSeconds = 0;
+    }
     this.dpr = Math.min(window.devicePixelRatio || 1, 2);
-    this.W = Math.max(1, this.root.clientWidth);
-    this.H = Math.max(1, this.root.clientHeight);
-    if (!this.lost) this.renderer?.resize(this.W * this.dpr, this.H * this.dpr);
+    this.W = W;
+    this.H = H;
+    const k = this.dpr * this.renderScale;
+    if (!this.lost) this.renderer?.resize(this.W * k, this.H * k);
     this.overlay.resize(this.W, this.H, this.dpr);
   }
 
   private frame(dt: number, now: number): void {
     const scene = this.scene;
+    const t = this.times;
+    const ema = (k: keyof FrameTimes, since: number) => {
+      const end = performance.now();
+      t[k] += (end - since - t[k]) * 0.1;
+      return end;
+    };
+    let t0 = performance.now();
     scene.update(Date.now(), dt);
+    t0 = ema('update', t0);
     this.hud.update(now);
+    if (!this.debugEl.hidden && now - this.debugAt > 500) this.showDebug(now);
     // nothing to show yet: keep the loading screen and draw the background at a few fps only
     if (!scene.hasData && this.idleFrames++ % 8 !== 0) return;
     // the camera holds still while the layout re-arranges, then settles on the new picture
     if (this.cam.auto && !scene.arranging) this.fit(Math.min(1, dt * 1.5));
+    t0 = performance.now();
     scene.build();
+    t0 = ema('build', t0);
     const gpu = this.gpu;
     if (gpu) {
       try {
@@ -242,15 +284,72 @@ class TracePong {
         this.fallback(e instanceof Error ? e.message : String(e));
       }
     }
+    t0 = ema('encode', t0);
     scene.sparks.reset();
     this.overlay.draw(scene, this.cam, !gpu);
+    ema('overlay', t0);
+  }
+
+  /**
+   * Called once a second. While fps stays below 45 for 3 s, lower the GPU resolution (0.75, then
+   * 0.5) and keep it only if fps improves by at least 10%; otherwise go back and stop trying,
+   * because the time is lost somewhere resolution does not matter.
+   */
+  private adaptScale(): void {
+    if (this.scaleSettled || !this.gpu || !this.scene.hasData || document.hidden || this.scene.paused) return;
+    const fps = this.fps;
+    const test = this.scaleTest;
+    if (test) {
+      if (--test.wait > 0) return;
+      this.scaleTest = null;
+      if (fps < test.fpsBefore * 1.1) {
+        this.renderScale = test.prev;
+        this.scaleNote = `(lower resolution did not help: ${Math.round(test.fpsBefore)} → ${Math.round(fps)} fps)`;
+        this.scaleSettled = true;
+        this.resize();
+      } else {
+        this.scaleNote = `(lowered automatically: ${Math.round(test.fpsBefore)} → ${Math.round(fps)} fps)`;
+      }
+      return;
+    }
+    if (fps >= 45) {
+      this.lowSeconds = 0;
+      return;
+    }
+    if (++this.lowSeconds < 3) return;
+    this.lowSeconds = 0;
+    if (this.renderScale <= 0.5) {
+      this.scaleSettled = true;
+      return;
+    }
+    this.scaleTest = { prev: this.renderScale, fpsBefore: fps, wait: 2 };
+    this.renderScale = this.renderScale > 0.75 ? 0.75 : 0.5;
+    this.scaleNote = '(testing a lower resolution…)';
+    this.resize();
+  }
+
+  private debugReport() {
+    return debugReport({
+      gpu: this.gpu, renderer: this.renderer, failure: this.failure, fps: this.fps, times: this.times,
+      css: [this.W, this.H], dpr: this.dpr, renderScale: this.renderScale, scaleNote: this.scaleNote,
+      bloom: this.renderer?.bloomOn ?? false, scene: this.scene, source: this.source,
+    });
+  }
+
+  private showDebug(now: number): void {
+    this.debugAt = now;
+    const body = el(this.root, 'debug-body');
+    // don't replace the text while the user is selecting it
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed && this.debugEl.contains(sel.anchorNode)) return;
+    body.innerHTML = debugHtml(this.debugReport());
   }
 
   private renderGpu(gpu: Renderer, dt: number): void {
     const scene = this.scene;
     const s = scene.out;
     gpu.render({
-      cam: this.cam, dpr: this.dpr, time: scene.time, dt: scene.paused ? 0 : dt, dim: 0,
+      cam: this.cam, dpr: this.dpr * this.renderScale, time: scene.time, dt: scene.paused ? 0 : dt, dim: 0,
       nodes: s.nodes.data, nodeCount: s.nodes.count,
       edges: s.edges.data, edgeCount: s.edges.count,
       under: s.under.data, underCount: s.under.count,
@@ -474,6 +573,14 @@ class TracePong {
       if (v === 'endpoints' || v === 'userNames' || v === 'radial') this.toggle(v);
     });
     this.on(el(root, 'restart'), 'click', () => void this.restartRenderer());
+    this.on(el(root, 'debug-copy'), 'click', () => {
+      const text = debugText(this.debugReport());
+      navigator.clipboard.writeText(text).then(() => this.toast('debug info copied'), () => {
+        console.log(text);
+        this.toast('copy blocked: printed to the browser console');
+      });
+    });
+    for (const t of ['pointerdown', 'wheel', 'dblclick'] as const) this.on(this.debugEl, t, (e) => e.stopPropagation());
 
     // Keys only while the panel has focus, and never leak to Grafana's own shortcuts.
     this.on(root, 'keydown', (e) => {
@@ -494,10 +601,15 @@ class TracePong {
         case ']': s.stretch = Math.min(50, s.stretch * 1.5); this.toast(`latency stretch ×${s.stretch.toFixed(1)}`); break;
         case '[': s.stretch = Math.max(0.5, s.stretch / 1.5); this.toast(`latency stretch ×${s.stretch.toFixed(1)}`); break;
         case 'h': case '?': help.hidden = !help.hidden; break;
+        case 'd':
+          this.debugEl.hidden = !this.debugEl.hidden;
+          if (!this.debugEl.hidden) this.showDebug(performance.now());
+          break;
         case 'Escape':
-          if (help.hidden && !s.focus) return;
+          if (help.hidden && !s.focus && this.debugEl.hidden) return;
           s.focus = null;
           help.hidden = true;
+          this.debugEl.hidden = true;
           break;
         default: return;
       }

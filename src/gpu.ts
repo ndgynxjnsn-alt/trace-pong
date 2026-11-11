@@ -79,6 +79,7 @@ export class Renderer {
         device.pushErrorScope('internal');
         device.pushErrorScope('validation');
         const r = new Renderer(device, canvas);
+        r.adapter = describeAdapter(adapter, label);
         r.resize(Math.max(1, canvas.clientWidth), Math.max(1, canvas.clientHeight));
         const errors = [await device.popErrorScope(), await device.popErrorScope(), await device.popErrorScope()].filter(Boolean);
         if (errors.length) throw new Error(errors.map((x) => x?.message).join(' / '));
@@ -119,6 +120,17 @@ export class Renderer {
 
 
   readonly device: GPUDevice;
+  /** what the browser gave us, for the debug view */
+  adapter: AdapterReport = { preference: '', info: {}, features: [], limits: {} };
+  /** ms from submitting a frame until the GPU finished it (sampled), null until measured */
+  gpuMs: number | null = null;
+  private gpuPending = false;
+  private frameNo = 0;
+  /** spark spawns as [scene clock, count], to draw only the part of the ring that can be alive */
+  private sparkLog: [number, number][] = [];
+  private sparkClock = 0;
+  /** sparks drawn in the last frame */
+  sparksDrawn = 0;
   bloomOn = true;
   /** called when the GPU device is lost (driver reset, GPU process crash, ...) */
   onLost: ((message: string) => void) | null = null;
@@ -358,6 +370,14 @@ export class Renderer {
     d.queue.writeBuffer(this.heatBuf, 0, heat);
     d.queue.writeBuffer(this.compParams, 0, new Float32Array([this.bloomOn ? 0.7 : 0, 1.1, 0.9, 0.018]));
     if (f.sparkCount) this.spawnSparks(f.sparks, f.sparkCount);
+    // sparks live ~1 s of scene time: only the slots written in the last 2 s can be alive
+    this.sparkClock += f.dt;
+    if (f.sparkCount) this.sparkLog.push([this.sparkClock, Math.min(f.sparkCount, MAX_SPARKS)]);
+    while (this.sparkLog.length && this.sparkClock - this.sparkLog[0][0] > 2) this.sparkLog.shift();
+    let live = 0;
+    for (const [, n] of this.sparkLog) live += n;
+    live = Math.min(MAX_SPARKS, live);
+    this.sparksDrawn = live;
 
     const eb = this.upload('edges', f.edges, f.edgeCount, 12);
     const nb = this.upload('nodes', f.nodes, f.nodeCount, 16);
@@ -394,9 +414,15 @@ export class Renderer {
     instanced(this.pEdges, this.bgEdges, eb, f.edgeCount);
     instanced(this.pSprites, this.bgSprites, ub, f.underCount);
     instanced(this.pNodes, this.bgNodes, nb, f.nodeCount);
-    rp.setPipeline(this.pSparks);
-    rp.setBindGroup(0, this.bgSparks);
-    rp.draw(6, MAX_SPARKS);
+    if (live) {
+      rp.setPipeline(this.pSparks);
+      rp.setBindGroup(0, this.bgSparks);
+      // the newest `live` slots of the ring, which may wrap around its end
+      const start = (this.sparkCursor - live + MAX_SPARKS) % MAX_SPARKS;
+      const first = Math.min(live, MAX_SPARKS - start);
+      rp.draw(6, first, 0, start);
+      if (live > first) rp.draw(6, live - first, 0, 0);
+    }
     instanced(this.pSprites, this.bgSprites, ob, f.overCount);
     rp.end();
 
@@ -413,7 +439,45 @@ export class Renderer {
     for (const p of this.upPasses) pass(this.pUp, p.dst, p.bg, true);
     pass(this.pComp, this.ctx.getCurrentTexture().createView(), this.bgComp, false);
     d.queue.submit([enc.finish()]);
+    // sample how long the GPU takes for a frame (submit -> done), a few times per second
+    if (!this.gpuPending && this.frameNo++ % 15 === 0) {
+      this.gpuPending = true;
+      const t0 = performance.now();
+      d.queue.onSubmittedWorkDone().then(() => {
+        const ms = performance.now() - t0;
+        this.gpuMs = this.gpuMs === null ? ms : this.gpuMs * 0.7 + ms * 0.3;
+        this.gpuPending = false;
+      }, () => { this.gpuPending = false; });
+    }
   }
+}
+
+export interface AdapterReport {
+  /** the power preference that produced this adapter */
+  preference: string;
+  /** GPUAdapterInfo: vendor, architecture, device, description, isFallbackAdapter, ... */
+  info: Record<string, string | number | boolean>;
+  features: string[];
+  limits: Record<string, number>;
+}
+
+function describeAdapter(adapter: GPUAdapter, preference: string): AdapterReport {
+  const info: Record<string, string | number | boolean> = {};
+  const ai = (adapter as GPUAdapter & { info?: GPUAdapterInfo }).info;
+  if (ai) {
+    // GPUAdapterInfo attributes live on the prototype: for..in sees them
+    for (const k in ai) {
+      const v = (ai as unknown as Record<string, unknown>)[k];
+      if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') info[k] = v;
+    }
+  }
+  const legacy = (adapter as unknown as { isFallbackAdapter?: boolean }).isFallbackAdapter;
+  if (typeof legacy === 'boolean' && !('isFallbackAdapter' in info)) info.isFallbackAdapter = legacy;
+  const limits: Record<string, number> = {};
+  for (const k of ['maxTextureDimension2D', 'maxBufferSize', 'maxComputeWorkgroupsPerDimension'] as const) {
+    limits[k] = adapter.limits[k];
+  }
+  return { preference, info, features: [...adapter.features].sort(), limits };
 }
 
 function errMsg(e: unknown): string {

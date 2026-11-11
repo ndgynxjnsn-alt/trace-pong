@@ -38,13 +38,20 @@ traffic, as promviz/Vizceral do. Unlike those, every ball is a **real call from 
 * **Sound** (off by default, speaker button or <kbd>M</kbd>): synthesized space explosions, large for errors,
   medium for 4xx, distant pops for the rest. All voices share a long reverb and a compressor so they stack
   into a rumble, and a per-severity budget keeps busy graphs listenable.
-* **Uninstrumented callers** (traces whose root is a server span without `traceparent` and without a
-  user: crawlers, monitors, webhooks) come out of a soft **cloud** in the top left, about ten nodes across;
+* **Mystery Cloud**: uninstrumented callers (traces whose root is a server span without `traceparent` and
+  without a user: crawlers, monitors, webhooks) come out of a soft cloud in the top left, about ten nodes across;
   each trace leaves from one of its many origin points and merges onto the edge.
 * **Databases** are octagons.
 * **No WebGPU, or a flaky one?** The panel asks for the high-performance GPU, then the default and the
   low-power one, and checks that every pipeline builds. If none works, or a device keeps failing or is
   lost, it carries on in a simple 2D canvas view (nodes, edges, balls, labels) with a "Retry WebGPU" button.
+* **Debug view** (<kbd>D</kbd>): the GPU adapter the browser gave us (and whether it is a software one),
+  the API the browser composites with (Vulkan, OpenGL, ...), where each frame's time goes (scene, GPU
+  submit, labels, GPU time), data rates (traces found, sampled out, fetched), and a diagnosis.
+  *copy* puts it all on the clipboard as text.
+* **Adaptive resolution**: when fps stays below 45, the GPU canvas drops to 75% and then 50% resolution,
+  but only keeps that if fps actually improves.
+* **Trace sampling** and **node renaming**, see the panel options.
 * **Follow a user**: click a user to see what their traces do, end to end: every node and edge their
   traces touched in the last 30 s (and what is queued) stays lit, from the frontend through the gateway
   and backends to the databases; everything else, including other users' balls and explosions, fades.
@@ -82,7 +89,10 @@ data source settings come from Grafana.
   Tempo setting below), set from the first traces that arrive. A trace that comes in later than that is
   started right away instead of slowing the clock. The clock top left shows playback time.
 
-Each viewer polls on its own, so *Traces per second* × viewers is the load on Tempo.
+Each viewer polls on its own, so *Traces per second* × viewers is the load on Tempo. *Trace sampling*
+lowers it: only traces whose id falls into the chosen share (the last 32 bits of the id, which are random)
+are fetched, so every viewer sees the same traces, and whole traces are kept or dropped. Rates still come
+from the service graph; one ball just stands for more real calls.
 
 ### Rendering
 
@@ -112,6 +122,8 @@ TypeScript (strict) under [src/](src/), no runtime dependencies besides what Gra
 | `sim.ts` | the built-in simulator |
 | `overlay.ts`, `hud.ts`, `ui.ts` | 2D labels, tooltip/clock, panel DOM and CSS |
 | `audio.ts` | synthesized explosions |
+| `rename.ts` | node renaming from the panel options |
+| `debug.ts` | the debug view (<kbd>D</kbd>) |
 
 The layout is a d3-force simulation with links, many-body repulsion, collision, a radial (or column) force per
 call-graph depth, a target angle per subtree, and custom forces that hold groups together and keep sibling
@@ -166,6 +178,8 @@ Then add a visualization of type **trace-pong** to a dashboard. The panel title 
 | Service graph label filter | – | PromQL matchers for the topology, e.g. `cluster="prod"` |
 | Rate window | `1m` | for rates and latencies |
 | Traces per second | 30 | upper bound fetched from Tempo, per viewer |
+| Trace sampling | all traces | fetch only 50% … 1% of the traces, picked by trace id |
+| Rename nodes | – | one `name = new name` per line, e.g. `10.10.10.10 = prod-postgres`; nodes renamed to the same name merge |
 | Show playback clock, Labels, Bloom | on | |
 | Ball speed, Latency stretch | 1, 2 | also on the keyboard |
 
@@ -185,7 +199,7 @@ top right zoom, re-fit and switch to **full screen** (also <kbd>Shift</kbd>+<kbd
 Click a service to pin focus. Keys work while the panel has focus: <kbd>space</kbd> pauses,
 <kbd>+</kbd>/<kbd>-</kbd> change ball speed, <kbd>[</kbd>/<kbd>]</kbd> change latency stretch (how long balls
 stay inside a service), <kbd>B</kbd>/<kbd>L</kbd>/<kbd>F</kbd> toggle bloom and labels or re-fit, <kbd>M</kbd> toggles sound, and
-<kbd>H</kbd> shows help.
+<kbd>H</kbd> shows help, <kbd>D</kbd> debug information.
 
 The help screen also has the **view** switches, remembered per browser: endpoints as nodes (<kbd>E</kbd>),
 user names instead of ids (<kbd>U</kbd>), radial or left-to-right layout (<kbd>R</kbd>).

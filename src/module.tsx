@@ -39,6 +39,8 @@ export function resolve(o: PanelOptions): ViewOptions {
     labelFilter: o.labelFilter || '',
     window: o.window || '1m',
     maxTraces: o.maxTraces || 30,
+    sampling: o.sampling || 100,
+    rename: o.rename || '',
     showClock: o.showClock !== false,
     labels: o.labels !== false,
     bloom: o.bloom !== false,
@@ -130,6 +132,7 @@ function dsPicker(type: string, placeholder: string) {
 
 const isLive = (o: PanelOptions) => o.mode !== 'sim';
 const WINDOWS: RateWindow[] = ['30s', '1m', '2m', '5m', '15m'];
+const SAMPLING = [100, 50, 25, 20, 10, 5, 2, 1];
 
 export const plugin = new PanelPlugin<PanelOptions>(TracePongPanel)
   .setNoPadding()
@@ -165,6 +168,18 @@ export const plugin = new PanelPlugin<PanelOptions>(TracePongPanel)
         path: 'maxTraces', name: 'Traces per second', category: ['Data'], showIf: isLive, defaultValue: 30,
         description: 'Upper bound of traces fetched from Tempo per second, per viewer.',
         settings: { min: 1, max: 200, integer: true },
+      })
+      .addSelect({
+        path: 'sampling', name: 'Trace sampling', category: ['Data'], showIf: isLive, defaultValue: 100,
+        description: 'Fetch only this share of the traces, chosen by trace id (every viewer sees the same ones). '
+          + 'Rates still come from the service graph, so only the number of balls goes down.',
+        settings: { options: SAMPLING.map((v) => ({ value: v, label: v === 100 ? 'all traces' : `${v}%` })) },
+      })
+      .addTextInput({
+        path: 'rename', name: 'Rename nodes', category: ['Data'], defaultValue: '',
+        description: 'One per line: name or address = new name, e.g. 10.10.10.10 = prod-postgres. '
+          + 'Applies to services, databases and database servers; nodes renamed to the same name merge. Lines starting with # are ignored.',
+        settings: { useTextarea: true, rows: 4, placeholder: '10.10.10.10 = prod-postgres' },
       })
       .addBooleanSwitch({ path: 'showClock', name: 'Show playback clock', category: ['Display'], defaultValue: true })
       .addBooleanSwitch({ path: 'labels', name: 'Labels', category: ['Display'], defaultValue: true })

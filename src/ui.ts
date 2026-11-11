@@ -16,6 +16,7 @@ export const HTML = `
   <div class="tp-lost" hidden><h3 class="tp-lost-title">The GPU device was lost</h3><p class="tp-lost-msg"></p><button class="tp-restart">Retry WebGPU</button></div>
   <div class="tp-foot"><span class="tp-fps"></span><span><kbd>H</kbd> help</span></div>
   <div class="tp-tip" hidden></div>
+  <div class="tp-debug" hidden><div class="tp-debug-head"><b>debug</b><button class="tp-debug-copy" title="Copy as text">copy</button><kbd>D</kbd></div><div class="tp-debug-body"></div></div>
   <div class="tp-toast"></div>
   <div class="tp-help" hidden>
     <h3>trace-pong</h3>
@@ -32,6 +33,7 @@ export const HTML = `
       <tr><td><kbd>+</kbd> <kbd>-</kbd></td><td>ball speed</td></tr>
       <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>latency stretch (how long balls are held)</td></tr>
       <tr><td><kbd>B</kbd> <kbd>L</kbd> <kbd>F</kbd></td><td>bloom / labels / fit</td></tr>
+      <tr><td><kbd>D</kbd></td><td>debug info: GPU adapter, frame timings, data rates</td></tr>
     </table>
     <h4>View</h4>
     <div class="tp-toggles">
@@ -126,5 +128,21 @@ export const CSS = `
 .tp-root .tp-lost p { margin: 0; color: var(--tp-dim); font: 11px var(--tp-mono); max-width: 360px; }
 .tp-root .tp-lost button { padding: 6px 14px; border-radius: 8px; cursor: pointer; border: 1px solid rgba(0, 229, 255, 0.5);
   background: rgba(0, 229, 255, 0.1); color: #dfe6f2; font: 600 12px Inter, system-ui, sans-serif; }
+.tp-root .tp-debug { position: absolute; top: 56px; left: 14px; z-index: 6; width: 430px; max-width: calc(100% - 28px);
+  max-height: calc(100% - 90px); overflow: auto; padding: 10px 12px; border-radius: 10px; font: 11px/1.45 var(--tp-mono);
+  background: rgba(8, 10, 18, 0.9); border: 1px solid rgba(255,255,255,0.12); user-select: text; cursor: auto; }
+.tp-root .tp-debug-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; color: #fff; }
+.tp-root .tp-debug-head b { flex: 1; }
+.tp-root .tp-debug-copy { padding: 1px 8px; border-radius: 6px; cursor: pointer; border: 1px solid rgba(255,255,255,0.18);
+  background: rgba(255,255,255,0.06); color: #dfe6f2; font: 10px var(--tp-mono); }
+.tp-root .tp-debug h5 { margin: 8px 0 2px; color: var(--tp-dim); font: 600 10px Inter, system-ui, sans-serif; text-transform: uppercase; letter-spacing: 0.8px; }
+.tp-root .tp-debug table { border-collapse: collapse; width: 100%; }
+.tp-root .tp-debug td { padding: 0 8px 0 0; vertical-align: top; word-break: break-word; }
+.tp-root .tp-debug td:first-child { color: var(--tp-dim); white-space: nowrap; width: 1%; }
+.tp-root .tp-debug .ok { color: #3ddc84; }
+.tp-root .tp-debug .warn { color: #ffb02e; }
+.tp-root .tp-debug .bad { color: var(--tp-bad); }
+.tp-root .tp-debug ul { margin: 2px 0 0; padding-left: 16px; }
+.tp-root .tp-debug li { margin: 2px 0; }
 .tp-root [hidden] { display: none !important; }
 `;

@@ -16,6 +16,17 @@ const POLL = 1000;
 const GRAPH_POLL = 3000;
 const CONCURRENCY = 8;
 
+/**
+ * Head sampling by trace id: keep a trace when its last 32 bits, read as a fraction, fall below
+ * the rate. W3C trace ids end in random bits, so every viewer keeps the same traces.
+ */
+export function keepTrace(traceId: string, percent: number): boolean {
+  if (!(percent < 100)) return true;
+  const tail = parseInt(traceId.slice(-8), 16);
+  if (!Number.isFinite(tail)) return true;
+  return tail / 0x100000000 < percent / 100;
+}
+
 // ---- API shapes (only the fields we read) ---------------------------------------------
 interface PromVector {
   data: { result: { metric: Record<string, string>; value: [number, string] }[] };
@@ -66,6 +77,9 @@ export class TempoSource implements Source {
   /** node names in the latest service graph, to name database nodes the same way */
   private known = new Set<string>();
   private stopped = false;
+  /** debug counters: decayed per-second rates and totals */
+  private counts = { found: 0, sampledOut: 0, fetched: 0, failed: 0, hops: 0, capped: 0 };
+  private countsSince = Date.now();
   private gt?: ReturnType<typeof setTimeout>;
   private ht?: ReturnType<typeof setTimeout>;
 
@@ -76,6 +90,30 @@ export class TempoSource implements Source {
     if (o.promUrl) void this.graphLoop();
     if (o.tempoUrl) void this.hopLoop();
   }
+
+  stats(): Record<string, string | number> {
+    // rates over the last full 10 s window (the running one until the first window is done)
+    const secs = Math.max(1, (Date.now() - this.countsSince) / 1000);
+    const c = this.counts;
+    const rate = (n: number) => `${(n / secs).toFixed(1)}/s`;
+    const now = {
+      sampling: `${this.o.sampling ?? 100}%`,
+      'traces found': rate(c.found),
+      'dropped by sampling': rate(c.sampledOut),
+      'dropped by cap': rate(c.capped),
+      'traces fetched': rate(c.fetched),
+      'fetch errors': rate(c.failed),
+      hops: rate(c.hops),
+    };
+    if (secs >= 10) {
+      this.lastStats = now;
+      this.counts = { found: 0, sampledOut: 0, fetched: 0, failed: 0, hops: 0, capped: 0 };
+      this.countsSince = Date.now();
+    }
+    return this.lastStats ?? now;
+  }
+
+  private lastStats: Record<string, string> | null = null;
 
   stop(): void {
     this.stopped = true;
@@ -201,10 +239,18 @@ export class TempoSource implements Source {
       const start = Number(BigInt(t.startTimeUnixNano) / 1000000n) / 1000;
       const end = start + (t.durationMs ?? 0) / 1000;
       if (this.seen.has(t.traceID) || now - end < LAG) continue;
+      this.counts.found++;
+      if (!keepTrace(t.traceID, this.o.sampling)) {
+        // decided once per trace: never look at it again
+        this.seen.set(t.traceID, now);
+        this.counts.sampledOut++;
+        continue;
+      }
       fresh.push([start, t.traceID]);
     }
     fresh.sort((a, b) => b[0] - a[0]);
     const ids = fresh.slice(0, this.o.maxTraces || 30).map((f) => f[1]);
+    this.counts.capped += fresh.length - ids.length;
     for (const id of ids) this.seen.set(id, now);
     if (this.seen.size > 20000) {
       for (const k of [...this.seen.keys()].slice(0, this.seen.size - 20000)) this.seen.delete(k);
@@ -218,7 +264,9 @@ export class TempoSource implements Source {
         try {
           const d = await this.env.get<{ trace?: OtlpTrace } & OtlpTrace>(`${this.o.tempoUrl}/api/v2/traces/${id}`);
           hops.push(...hopsFromTrace(d.trace ?? d, this.known));
+          this.counts.fetched++;
         } catch {
+          this.counts.failed++;
           // a single missing trace is not worth an error message
         }
       }
@@ -226,6 +274,7 @@ export class TempoSource implements Source {
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, ids.length) }, worker));
     if (this.stopped || !hops.length) return;
     this.tracesSeen = true;
+    this.counts.hops += hops.length;
     hops.sort((a, b) => a.t - b.t);
     this.scene.ingest(hops, Date.now(), this.first);
     this.first = false;

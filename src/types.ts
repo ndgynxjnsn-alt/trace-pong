@@ -2,7 +2,7 @@
 
 export type Rgb = [number, number, number];
 
-/** cloud: callers we cannot see (no traceparent, no user), i.e. uninstrumented clients */
+/** cloud: the Mystery Cloud, callers we cannot see (no traceparent, no user), i.e. uninstrumented clients */
 export type NodeKind = 'service' | 'database' | 'external' | 'user' | 'cloud';
 export type HopKind = 'http' | 'messaging' | 'db' | 'ext';
 export type Severity = 'err' | 'warn' | 'redirect' | 'ok';
@@ -86,6 +86,8 @@ export interface Source {
     /** what we are waiting for while there is nothing to show */
     waiting: string | null;
   };
+  /** counters for the debug view */
+  stats?(): Record<string, string | number>;
   stop(): void;
 }
 
@@ -105,6 +107,10 @@ export interface PanelOptions {
   labelFilter: string;
   window: RateWindow;
   maxTraces: number;
+  /** percent of traces to fetch, chosen by trace id (the same traces for every viewer) */
+  sampling: number;
+  /** node renames, one `from = to` per line */
+  rename: string;
   showClock: boolean;
   labels: boolean;
   bloom: boolean;

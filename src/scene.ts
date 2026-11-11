@@ -5,6 +5,7 @@ import {
   type Simulation, type SimulationLinkDatum, type SimulationNodeDatum,
 } from 'd3-force';
 import { SPARK_FLOATS } from './gpu';
+import { renameGraph, renameHop, type Renames } from './rename';
 import type { Graph, GraphNode, Hop, NodeKind, Rgb, Severity, UserInfo, ViewMode } from './types';
 
 // ---------------------------------------------------------------------------
@@ -99,7 +100,7 @@ const outside = (n: { kind: NodeKind }) => n.kind === 'user' || n.kind === 'clou
 /** separator inside node ids and group keys (never shown) */
 const SEP = '\u001f';
 const USERS_PER_COLUMN = 28;
-const CLOUD_LABEL = 'uninstrumented callers';
+const CLOUD_LABEL = 'Mystery Cloud';
 /** following a user shows what their traces touched in this much playback time (plus what is queued) */
 const USER_PATH_MS = 30000;
 const USER_ROW_GAP = 54;
@@ -381,6 +382,8 @@ export class Scene {
   private hopCount = 0;
   /** service-graph rate / sampled hop rate */
   private factor = 1;
+  /** node renames from the panel options, applied to everything that comes in */
+  renames: Renames = new Map();
   private lastIdentifiedUser = -Infinity;
   private lastAnonUser = -Infinity;
   private topologyDirty = true;
@@ -626,8 +629,9 @@ export class Scene {
   }
 
   /** Service-graph metrics: node kinds and stats; in the service view also the nodes and edges themselves. */
-  applyGraph(g: Graph): void {
-    this.graph = g;
+  applyGraph(raw: Graph): void {
+    const g = renameGraph(raw, this.renames);
+    this.graph = raw;
     this.svcStats.clear();
     for (const gn of g.nodes) {
       this.svcStats.set(gn.id, gn);
@@ -928,6 +932,26 @@ export class Scene {
     return this.arrangeUntil > 0;
   }
 
+  /** counters for the debug view */
+  debugStats(): Record<string, string | number> {
+    let users = 0, endpoints = 0;
+    for (const n of this.nodes.values()) {
+      if (n.level === 'user') users++;
+      else if (n.level === 'endpoint') endpoints++;
+    }
+    return {
+      nodes: `${this.nodes.size} (${users} users, ${endpoints} endpoints)`,
+      edges: this.edges.size,
+      'balls in flight': this.balls.length,
+      'balls queued': this.queue.length,
+      'shockwaves': this.rings.length,
+      'playback delay': this.delay === null ? '–' : `${(this.delay / 1000).toFixed(1)} s`,
+      'real calls per ball': this.factor.toFixed(1),
+      renames: this.renames.size,
+      layout: this.arranging ? 'arranging' : 'calm',
+    };
+  }
+
   private arrange(dt: number): void {
     const CALM = 20000, ARRANGE = 4000;
     const now = performance.now();
@@ -1063,8 +1087,9 @@ export class Scene {
    * service after the ball that triggered it has arrived there, and a response only goes back
    * after the children have returned.
    */
-  ingest(hops: Hop[], wallNow: number, backlog: boolean): void {
-    if (!hops.length) return;
+  ingest(raw: Hop[], wallNow: number, backlog: boolean): void {
+    if (!raw.length) return;
+    const hops = this.renames.size ? raw.map((h) => renameHop(h, this.renames)) : raw;
     let maxT = -Infinity;
     for (const h of hops) maxT = Math.max(maxT, h.t);
     // The playback clock runs at real speed, a fixed delay behind the wall clock. Traces that

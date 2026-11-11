@@ -24,6 +24,10 @@ database › table), user names instead of ids, and a radial or left-to-right la
 * **TraceQL filter** picks the traces to replay. **Service graph label filter** (PromQL matchers) picks
   the topology. Both accept dashboard variables.
 * **Traces per second**: the upper bound fetched from Tempo per viewer.
+* **Trace sampling**: fetch only a share of the traces (50% down to 1%), picked by trace id, so all viewers
+  see the same ones. Rates still come from the service graph.
+* **Rename nodes**: one `name = new name` per line, e.g. `10.10.10.10 = prod-postgres`. Works for services,
+  databases and database servers; nodes renamed to the same name merge.
 * **Simulator** mode needs no data sources.
 
-Drag to pan, ctrl+wheel to zoom, click to focus a service, and press `H` in the panel for keys.
+Drag to pan, ctrl+wheel to zoom, click to focus a service, and press `H` in the panel for keys and `D` for debug information (GPU adapter, frame timings).
