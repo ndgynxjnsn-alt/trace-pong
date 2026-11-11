@@ -38,6 +38,13 @@ traffic, as promviz/Vizceral do. Unlike those, every ball is a **real call from 
 * **Sound** (off by default, speaker button or <kbd>M</kbd>): synthesized space explosions, large for errors,
   medium for 4xx, distant pops for the rest. All voices share a long reverb and a compressor so they stack
   into a rumble, and a per-severity budget keeps busy graphs listenable.
+* **Uninstrumented callers** (traces whose root is a server span without `traceparent` and without a
+  user: crawlers, monitors, webhooks) come out of a soft **cloud** in the top left, about ten nodes across;
+  each trace leaves from one of its many origin points and merges onto the edge.
+* **Databases** are octagons.
+* **No WebGPU, or a flaky one?** The panel asks for the high-performance GPU, then the default and the
+  low-power one, and checks that every pipeline builds. If none works, or a device keeps failing or is
+  lost, it carries on in a simple 2D canvas view (nodes, edges, balls, labels) with a "Retry WebGPU" button.
 * **Follow a user**: click a user to see what their traces do, end to end: every node and edge their
   traces touched in the last 30 s (and what is queued) stays lit, from the frontend through the gateway
   and backends to the databases; everything else, including other users' balls and explosions, fades.
@@ -131,7 +138,7 @@ The plugin is unsigned, so Grafana must be told to load it. Build the ZIP first 
 otherwise a `node:22` container):
 
 ```bash
-scripts/build.sh                     # type-check, build -> dist/tracepong-live-panel-1.8.0.zip
+scripts/build.sh                     # type-check, build -> dist/tracepong-live-panel-1.9.0.zip
 ```
 
 * **Any Grafana ≥ 11** (tested with 13.1): unzip into the plugin folder and allow the unsigned plugin:
@@ -144,7 +151,7 @@ scripts/build.sh                     # type-check, build -> dist/tracepong-live-
   which unpacks every mounted ZIP before starting Grafana. Copy the `grafana` service from
   [docker-compose.yml](docker-compose.yml).
 * **From a URL** (e.g. a release asset):
-  `GF_PLUGINS_PREINSTALL_SYNC=tracepong-live-panel@1.8.0@https://…/tracepong-live-panel-1.8.0.zip`.
+  `GF_PLUGINS_PREINSTALL_SYNC=tracepong-live-panel@1.9.0@https://…/tracepong-live-panel-1.9.0.zip`.
 
 Then add a visualization of type **trace-pong** to a dashboard. The panel title is the title.
 
@@ -215,7 +222,8 @@ OpenTelemetry SDK, so their shapes match exactly what the service-graph processo
 The load generator plays **shop-web**, a browser app instrumented with Grafana Faro: each request is a root
 CLIENT span with Faro's user and session attributes and view name, made by one of a rotating set of fake
 OAuth users ([mesh/users.py](mesh/users.py): Google, Auth0, GitHub and Okta style ids, names, emails), and
-carries the user's JWT to the gateway, which reads the claims and tags its server span with the user id.
+carries the user's JWT to the gateway, which reads the claims and tags its server span with the user id. About 15% of
+requests (`ANON_SHARE`) come from uninstrumented callers instead: no trace context, no token.
 
 The load generator's traffic varies over time, with occasional flash crowds. Every 4 minutes one service
 has a 70 s **incident** (errors or latency), computed from wall-clock time so all containers agree.

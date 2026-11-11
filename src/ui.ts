@@ -13,7 +13,7 @@ export const HTML = `
   </div>
   <div class="tp-error"></div>
   <div class="tp-loading"><div class="tp-spinner"></div><div class="tp-loading-msg">connecting…</div></div>
-  <div class="tp-lost" hidden><h3>The GPU device was lost</h3><p class="tp-lost-msg"></p><button class="tp-restart">Restart renderer</button></div>
+  <div class="tp-lost" hidden><h3 class="tp-lost-title">The GPU device was lost</h3><p class="tp-lost-msg"></p><button class="tp-restart">Retry WebGPU</button></div>
   <div class="tp-foot"><span class="tp-fps"></span><span><kbd>H</kbd> help</span></div>
   <div class="tp-tip" hidden></div>
   <div class="tp-toast"></div>

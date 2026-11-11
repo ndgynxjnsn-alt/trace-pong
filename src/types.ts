@@ -2,7 +2,8 @@
 
 export type Rgb = [number, number, number];
 
-export type NodeKind = 'service' | 'database' | 'external' | 'user';
+/** cloud: callers we cannot see (no traceparent, no user), i.e. uninstrumented clients */
+export type NodeKind = 'service' | 'database' | 'external' | 'user' | 'cloud';
 export type HopKind = 'http' | 'messaging' | 'db' | 'ext';
 export type Severity = 'err' | 'warn' | 'redirect' | 'ok';
 export type RateWindow = '30s' | '1m' | '2m' | '5m' | '15m';

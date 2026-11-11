@@ -1,6 +1,6 @@
 // 2D canvas on top of the WebGPU canvas: node labels, Tempo-style stats, floating text.
-import type { Scene, SceneNode } from './scene';
-import type { Camera } from './types';
+import { css, type Scene, type SceneNode } from './scene';
+import type { Camera, Rgb } from './types';
 
 export const fmtRate = (r: number) => (r >= 100 ? r.toFixed(0) : r >= 10 ? r.toFixed(1) : r.toFixed(2));
 export const fmtMs = (ms: number | null) =>
@@ -30,13 +30,15 @@ export class Overlay {
     this.h = h;
   }
 
-  draw(scene: Scene, cam: Camera): void {
+  /** basic: no WebGPU, so draw the graph itself here too (plain 2D: no glow, no particles) */
+  draw(scene: Scene, cam: Camera, basic = false): void {
     const c = this.ctx;
     c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     c.clearRect(0, 0, this.w, this.h);
     const z = cam.zoom;
     const sx = (x: number) => (x - cam.x) * z + this.w / 2;
     const sy = (y: number) => (y - cam.y) * z + this.h / 2;
+    if (basic) this.drawBasic(scene, sx, sy, z);
     const fs = scene.focusSet();
     c.textAlign = 'center';
     c.textBaseline = 'middle';
@@ -99,7 +101,7 @@ export class Overlay {
           la = a * Math.min(1, n.active * 1.6);
           if (la < 0.05) continue;
         }
-        let label = n.id === 'user' ? 'USERS' : scene.labelOf(n);
+        let label = scene.labelOf(n);
         const max = big ? 60 : n.level === 'user' ? 20 : 28;
         if (label.length > max) label = `${label.slice(0, max - 1)}…`;
         const size = small ? Math.max(9, Math.min(12, 10.5 * Math.sqrt(z))) : Math.max(10, Math.min(14, 12 * Math.sqrt(z)));
@@ -115,13 +117,13 @@ export class Overlay {
           c.fillText(label, lx, ly);
         }
         // Tempo-style stats inside
-        if (r > 16 && n.kind !== 'user') {
+        if (r > 16 && n.kind !== 'user' && n.kind !== 'cloud') {
           c.font = `600 ${Math.max(9, Math.min(12, r * 0.36))}px ${MONO}`;
           c.fillStyle = `rgba(235,240,250,${0.9 * a})`;
           c.fillText(n.mean != null ? fmtMs(n.mean).replace(' ', '') : '–', x, y - r * 0.2);
           c.fillStyle = `rgba(160,175,200,${0.85 * a})`;
           c.fillText(`${fmtRate(n.rate)} r/s`, x, y + r * 0.24);
-        } else if (n.id === 'user' && r > 18) {
+        } else if (n.kind === 'cloud' && r > 18) {
           c.font = `700 ${Math.min(13, r * 0.36)}px ${MONO}`;
           c.fillStyle = `rgba(235,240,250,${0.9 * a})`;
           c.fillText(fmtRate(n.outRate), x, y - r * 0.12);
@@ -147,6 +149,86 @@ export class Overlay {
       c.shadowBlur = 0;
     }
     c.globalAlpha = 1;
+  }
+
+  private drawBasic(scene: Scene, sx: (x: number) => number, sy: (y: number) => number, z: number): void {
+    const c = this.ctx;
+    const fs = scene.focusSet();
+    const dim = (id: string) => (!fs || fs.has(id) ? 1 : 0.2);
+    // edges
+    c.lineWidth = 1;
+    for (const e of scene.edges.values()) {
+      const a = scene.nodes.get(e.s), b = scene.nodes.get(e.t);
+      if (!a || !b) continue;
+      const err = e.rate > 0 ? Math.min(1, (e.err / e.rate) * 4) : 0;
+      c.strokeStyle = `rgba(${Math.round(70 + 185 * err)},${Math.round(100 - 60 * err)},${Math.round(150 - 110 * err)},${0.35 * Math.min(a.alpha, b.alpha) * Math.min(dim(e.s), dim(e.t))})`;
+      c.beginPath();
+      for (let i = 0; i < e.pts.length; i += 2) c.lineTo(sx(e.pts[i]), sy(e.pts[i + 1]));
+      c.stroke();
+    }
+    // nodes
+    for (const n of scene.nodes.values()) {
+      const x = sx(n.x), y = sy(n.y), r = n.r * z, a = n.alpha * dim(n.id);
+      if (n.kind === 'cloud') {
+        const g = c.createRadialGradient(x, y, 0, x, y, r);
+        g.addColorStop(0, `rgba(120,135,175,${0.22 * a})`);
+        g.addColorStop(1, 'rgba(120,135,175,0)');
+        c.fillStyle = g;
+        c.beginPath();
+        c.ellipse(x, y, r, r * 0.75, 0, 0, Math.PI * 2);
+        c.fill();
+        continue;
+      }
+      nodePath(c, n, x, y, r);
+      c.fillStyle = `rgba(6,8,14,${0.9 * a})`;
+      c.fill();
+      const err = n.rate > 0 ? n.errRate / n.rate : 0;
+      c.lineWidth = n.kind === 'user' ? 1.2 : 2.5;
+      c.strokeStyle = n.kind === 'user' ? css(n.rgb, a) : err > 0.05 ? `rgba(255,60,80,${a})` : n.kind === 'database' ? `rgba(60,140,255,${a})` : `rgba(60,215,100,${a})`;
+      c.stroke();
+    }
+    // balls
+    const tmp = [0, 0, 0, 0];
+    for (const b of scene.balls) {
+      if (b.phase === 1) continue;
+      const req = b.phase === 0;
+      const t0 = req ? b.depart : b.ret, t1 = req ? b.arrive : b.back;
+      const u = (scene.play - t0) / (t1 - t0);
+      if (u < 0 || u > 1) continue;
+      scene.ballAt(b, req ? u : 1 - u, req ? 4 : -4, tmp);
+      const focus = !fs || (fs.has(b.src) && fs.has(b.dst));
+      c.fillStyle = b.err ? '#ff4d5e' : linCss(b.rgb, focus ? 0.95 : 0.15);
+      c.beginPath();
+      c.arc(sx(tmp[0]), sy(tmp[1]), Math.max(1.5, 3.2 * z), 0, Math.PI * 2);
+      c.fill();
+    }
+    // shockwaves
+    for (const r of scene.rings) {
+      const k = r.age / r.life;
+      c.strokeStyle = linCss(r.rgb, (1 - k) * r.a * 0.8);
+      c.lineWidth = 1.5;
+      c.beginPath();
+      c.arc(sx(r.x), sy(r.y), (r.r0 + (r.r1 - r.r0) * (1 - Math.pow(1 - k, 3))) * z, 0, Math.PI * 2);
+      c.stroke();
+    }
+  }
+}
+
+const srgb = (v: number) => Math.round(255 * Math.min(1, Math.pow(Math.max(0, v), 1 / 2.2)));
+const linCss = (rgb: Rgb, a: number) => `rgba(${srgb(rgb[0])},${srgb(rgb[1])},${srgb(rgb[2])},${a})`;
+
+function nodePath(c: CanvasRenderingContext2D, n: SceneNode, x: number, y: number, r: number): void {
+  c.beginPath();
+  if (n.kind === 'database') {
+    // octagon with flat sides, inradius r
+    const R = r / Math.cos(Math.PI / 8);
+    for (let i = 0; i < 8; i++) {
+      const a = Math.PI / 8 + (i * Math.PI) / 4;
+      c.lineTo(x + Math.cos(a) * R, y + Math.sin(a) * R);
+    }
+    c.closePath();
+  } else {
+    c.arc(x, y, r, 0, Math.PI * 2);
   }
 }
 

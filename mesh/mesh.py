@@ -327,7 +327,22 @@ def loadgen():
     pool = ThreadPoolExecutor(max_workers=128)
     stats = {"ok": 0, "err": 0}
 
+    anon_share = float(os.environ.get("ANON_SHARE", "0.15"))
+    anon_routes = ["GET /api/products", "GET /api/products/{id}", "GET /api/search", "GET /api/health"]
+
+    def fire_anonymous():
+        # crawlers, uptime monitors, partner webhooks: no traceparent, no token, not instrumented,
+        # so the gateway starts the trace and nobody knows who called
+        method, path = random.choice(anon_routes).split(" ", 1)
+        req = urllib.request.Request(f"http://{target}:{PORT}{fill(path)}", method=method)
+        try:
+            urllib.request.urlopen(req, timeout=30).close()
+        except Exception:
+            pass
+
     def fire():
+        if random.random() < anon_share:
+            return fire_anonymous()
         route = random.choices(routes, weights)[0]
         method, path = route.split(" ", 1)
         user = users.pick()

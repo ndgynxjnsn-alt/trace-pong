@@ -42,24 +42,20 @@ export async function createTracePong(container: HTMLElement, env: Env, options:
   root.innerHTML = HTML;
   container.appendChild(root);
 
-  let renderer: Renderer;
+  // Without WebGPU (or when it fails to start) trace-pong still runs, drawn with a plain 2D canvas.
+  let renderer: Renderer | null = null;
+  let failure: string | null = null;
   try {
     renderer = await Renderer.create(el<HTMLCanvasElement>(root, 'gpu'));
   } catch (e) {
-    el(root, 'nogpu').hidden = false;
-    el(root, 'nogpu-msg').textContent = e instanceof Error ? e.message : String(e);
-    const scene = new Scene();
-    return {
-      setOptions() {},
-      destroy: () => root.remove(),
-      debug: () => ({ scene, cam: { x: 0, y: 0, zoom: 1, auto: true }, renderer: null, source: null, sfx: null }),
-    };
+    failure = e instanceof Error ? e.message : String(e);
+    console.warn('trace-pong:', failure);
   }
-  const tp = new TracePong(root, renderer, env, options);
+  const tp = new TracePong(root, renderer, env, options, failure);
   return {
     setOptions: (o) => tp.setOptions(o),
     destroy: () => tp.destroy(),
-    debug: () => ({ scene: tp.scene, cam: tp.cam, renderer, source: tp.source, sfx: tp.sfx }),
+    debug: () => ({ scene: tp.scene, cam: tp.cam, renderer: tp.gpu, source: tp.source, sfx: tp.sfx }),
   };
 }
 
@@ -91,9 +87,11 @@ class TracePong {
   private idleFrames = 0;
   private lost = false;
 
-  constructor(private readonly root: HTMLElement, private renderer: Renderer, private readonly env: Env, options: ViewOptions) {
+  constructor(private readonly root: HTMLElement, private renderer: Renderer | null, private readonly env: Env, options: ViewOptions,
+    failure: string | null) {
     this.o = { ...options };
-    this.watchDevice();
+    if (this.renderer) this.watchDevice();
+    else this.fallback(failure ?? 'WebGPU is not available');
     this.text = el<HTMLCanvasElement>(root, 'text');
     this.tip = el(root, 'tip');
     this.help = el(root, 'help');
@@ -136,13 +134,27 @@ class TracePong {
    * automatic restart, then offer a button.
    */
   private watchDevice(): void {
+    if (!this.renderer) return;
     this.renderer.onLost = (msg) => {
       if (this.destroyed) return;
       this.lost = true;
       el(this.root, 'lost-msg').textContent = msg;
       if (this.autoRestarts++ < 1) setTimeout(() => void this.restartRenderer(), 1000);
-      else el(this.root, 'lost').hidden = false;
+      else this.fallback(msg);
     };
+  }
+
+  /** WebGPU unusable: keep going with the 2D view and say so, with a retry button */
+  private fallback(msg: string): void {
+    this.lost = true;
+    el(this.root, 'gpu').style.visibility = 'hidden';   // no stale GPU frame under the 2D view
+    el(this.root, 'lost-title').textContent = 'WebGPU unavailable, simple 2D view';
+    el(this.root, 'lost-msg').textContent = msg;
+    el(this.root, 'lost').hidden = false;
+  }
+
+  get gpu(): Renderer | null {
+    return this.lost ? null : this.renderer;
   }
 
   private autoRestarts = 0;
@@ -150,15 +162,16 @@ class TracePong {
   private async restartRenderer(): Promise<void> {
     try {
       const r = await Renderer.create(el<HTMLCanvasElement>(this.root, 'gpu'));
+      if (this.renderer && this.renderer !== r) this.renderer.device.destroy();
       this.renderer = r;
       this.watchDevice();
+      this.lost = false;
+      el(this.root, 'gpu').style.visibility = '';
       this.apply();
       this.resize();
-      this.lost = false;
       el(this.root, 'lost').hidden = true;
     } catch (e) {
-      el(this.root, 'lost-msg').textContent = e instanceof Error ? e.message : String(e);
-      el(this.root, 'lost').hidden = false;
+      this.fallback(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -173,14 +186,14 @@ class TracePong {
     clearTimeout(this.toastTimer);
     this.cleanup.forEach((f) => f());
     this.source?.stop();
-    this.renderer.device.destroy();
+    this.renderer?.device.destroy();
     this.sfx.destroy();
     this.root.remove();
   }
 
   private apply(): void {
     const o = this.o;
-    this.renderer.bloomOn = o.bloom;
+    if (this.renderer) this.renderer.bloomOn = o.bloom;
     this.overlay.labels = o.labels;
     this.root.classList.toggle('tp-noclock', !o.showClock);
     if (SOURCE_KEYS.some((k) => this.applied[k] !== o[k])) {
@@ -207,7 +220,7 @@ class TracePong {
     this.dpr = Math.min(window.devicePixelRatio || 1, 2);
     this.W = Math.max(1, this.root.clientWidth);
     this.H = Math.max(1, this.root.clientHeight);
-    this.renderer.resize(this.W * this.dpr, this.H * this.dpr);
+    if (!this.lost) this.renderer?.resize(this.W * this.dpr, this.H * this.dpr);
     this.overlay.resize(this.W, this.H, this.dpr);
   }
 
@@ -220,8 +233,23 @@ class TracePong {
     // the camera holds still while the layout re-arranges, then settles on the new picture
     if (this.cam.auto && !scene.arranging) this.fit(Math.min(1, dt * 1.5));
     scene.build();
+    const gpu = this.gpu;
+    if (gpu) {
+      try {
+        this.renderGpu(gpu, dt);
+      } catch (e) {
+        // never let a GPU problem take the panel down
+        this.fallback(e instanceof Error ? e.message : String(e));
+      }
+    }
+    scene.sparks.reset();
+    this.overlay.draw(scene, this.cam, !gpu);
+  }
+
+  private renderGpu(gpu: Renderer, dt: number): void {
+    const scene = this.scene;
     const s = scene.out;
-    if (!this.lost) this.renderer.render({
+    gpu.render({
       cam: this.cam, dpr: this.dpr, time: scene.time, dt: scene.paused ? 0 : dt, dim: 0,
       nodes: s.nodes.data, nodeCount: s.nodes.count,
       edges: s.edges.data, edgeCount: s.edges.count,
@@ -231,8 +259,6 @@ class TracePong {
       hulls: s.hulls.data, hullCount: s.hulls.count,
       sparks: scene.sparks.data, sparkCount: scene.sparks.count,
     });
-    scene.sparks.reset();
-    this.overlay.draw(scene, this.cam);
   }
 
   // ---- view toggles (help overlay, keys E / U / R), remembered per browser ----------------
@@ -455,7 +481,7 @@ class TracePong {
       const s = this.scene;
       switch (e.key) {
         case ' ': s.paused = !s.paused; this.toast(s.paused ? 'paused' : 'playing'); break;
-        case 'b': this.renderer.bloomOn = !this.renderer.bloomOn; break;
+        case 'b': if (this.renderer) this.renderer.bloomOn = !this.renderer.bloomOn; break;
         case 'l': this.overlay.labels = !this.overlay.labels; break;
         case 'f': cam.auto = true; break;
         case 'F': this.toggleFull(); break;

@@ -46,28 +46,77 @@ interface Pass {
 }
 
 export class Renderer {
+  /**
+   * Start WebGPU, or throw with a readable reason. Asks for the high-performance GPU first, then
+   * the default and the low-power one. Each candidate must create every pipeline without a
+   * validation or internal error (some drivers, e.g. Firefox on integrated GPUs, fail here),
+   * otherwise the next one is tried.
+   */
   static async create(canvas: HTMLCanvasElement): Promise<Renderer> {
-    if (!navigator.gpu) throw new Error('WebGPU is not available in this browser.');
-    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-    if (!adapter) throw new Error('No WebGPU adapter found.');
-    const device = await adapter.requestDevice();
-    const r = new Renderer(device, canvas);
+    const gpu = navigator.gpu;
+    if (!gpu) throw new Error('WebGPU is not available in this browser.');
+    const problems: string[] = [];
+    const tried = new Set<GPUAdapter>();
+    for (const pref of ['high-performance', undefined, 'low-power'] as (GPUPowerPreference | undefined)[]) {
+      const label = pref ?? 'default';
+      let adapter: GPUAdapter | null = null;
+      try {
+        adapter = await gpu.requestAdapter(pref ? { powerPreference: pref } : undefined);
+      } catch (e) {
+        problems.push(`${label}: ${errMsg(e)}`);
+        continue;
+      }
+      if (!adapter) {
+        problems.push(`${label}: no adapter`);
+        continue;
+      }
+      if (tried.has(adapter)) continue;
+      tried.add(adapter);
+      let device: GPUDevice | null = null;
+      try {
+        device = await adapter.requestDevice();
+        device.pushErrorScope('out-of-memory');
+        device.pushErrorScope('internal');
+        device.pushErrorScope('validation');
+        const r = new Renderer(device, canvas);
+        r.resize(Math.max(1, canvas.clientWidth), Math.max(1, canvas.clientHeight));
+        const errors = [await device.popErrorScope(), await device.popErrorScope(), await device.popErrorScope()].filter(Boolean);
+        if (errors.length) throw new Error(errors.map((x) => x?.message).join(' / '));
+        r.watch();
+        return r;
+      } catch (e) {
+        problems.push(`${label}: ${errMsg(e)}`);
+        device?.destroy();
+      }
+    }
+    throw new Error(`WebGPU could not start (${problems.join('; ')})`);
+  }
+
+  /** report device loss, and give up on a device that keeps erroring (log each message once) */
+  private watch(): void {
+    const device = this.device;
     device.lost.then((info) => {
       if (info.reason === 'destroyed') return;
       console.error('WebGPU device lost:', info.message);
-      r.onLost?.(info.message || 'unknown reason');
+      this.onLost?.(info.message || 'unknown reason');
     });
-    // log validation errors once each instead of every frame
     const seen = new Set<string>();
+    let count = 0, since = performance.now();
     device.addEventListener('uncapturederror', (e) => {
       const msg = e.error.message;
       if (seen.size < 20 && !seen.has(msg)) {
         seen.add(msg);
         console.error('WebGPU:', msg);
       }
+      const now = performance.now();
+      if (now - since > 5000) {
+        count = 0;
+        since = now;
+      }
+      if (++count === 30) this.onLost?.(`repeated WebGPU errors: ${msg}`);
     });
-    return r;
   }
+
 
   readonly device: GPUDevice;
   bloomOn = true;
@@ -365,4 +414,8 @@ export class Renderer {
     pass(this.pComp, this.ctx.getCurrentTexture().createView(), this.bgComp, false);
     d.queue.submit([enc.finish()]);
   }
+}
+
+function errMsg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }

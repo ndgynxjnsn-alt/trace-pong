@@ -56,6 +56,7 @@ const MIX: [string, number, string][] = [
   ['GET /api/account', 6, '/account'], ['GET /api/orders', 5, '/account/orders'], ['PUT /api/settings', 2, '/account/settings'],
   ['GET /api/health', 2, '/'],
 ];
+const ANON = ['GET /api/products', 'GET /api/products/{id}', 'GET /api/search', 'GET /api/health'];
 const ERR: Record<string, number> = { payment: 0.04, inventory: 0.02, auth: 0.02, catalog: 0.01 };
 const FRONTEND = 'shop-web';
 
@@ -172,6 +173,11 @@ export class SimSource implements Source {
     for (let i = 0; i < n; i++) {
       const t = now - 6000 - span + Math.random() * span;
       const tr = Math.random().toString(16).slice(2, 10);
+      if (Math.random() < 0.15) {
+        // an uninstrumented caller (crawler, monitor, webhook): no traceparent, no user
+        this.call('user', '', 'gateway', ANON[Math.floor(Math.random() * ANON.length)], t, tr, hops);
+        continue;
+      }
       const [route, , view] = pickWeighted(MIX, (m) => m[1]);
       // the user's click in the browser (Faro root span), then the fetch to the gateway
       const ui: Hop = { t, d: 0, f: 'user', to: FRONTEND, n: view, c: 200, e: false, k: 'http', tr, te: view, tg: [FRONTEND], u: this.pickUser(now) };

@@ -55,6 +55,7 @@ function traceRgb(tr: string): Rgb {
 function ownerRgb(owner: string, kind: NodeKind): Rgb {
   const h = hashStr(owner);
   if (kind === 'user') return [0.78, 0.86, 1.0];
+  if (kind === 'cloud') return [0.55, 0.62, 0.8];
   if (kind === 'database') return hslRgb(0.53 + h * 0.12, 0.85, 0.6);
   if (kind === 'external') return hslRgb(0.72 + h * 0.12, 0.8, 0.66);
   return hslRgb((h * 7.31) % 1, 0.9, 0.6);
@@ -79,10 +80,26 @@ function statusFx(h: Hop): StatusFx {
   return { sev: 'ok', rgb: null, grow: 0.7, life: 0.45, a: 0.4 };
 }
 
-const KIND: Record<NodeKind, number> = { service: 0, database: 1, external: 2, user: 3 };
+const KIND: Record<NodeKind, number> = { service: 0, database: 1, external: 2, user: 3, cloud: 4 };
+/** the cloud of uninstrumented callers: about ten normal nodes across */
+const CLOUD_R = 260;
+/** origin points inside the cloud (unit coordinates, flattened ellipse); each trace leaves from one */
+const CLOUD_ORIGINS: Vec2[] = (() => {
+  const pts: Vec2[] = [];
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  while (pts.length < 48) {
+    const x = rnd() * 2 - 1, y = rnd() * 2 - 1;
+    if (x * x + y * y * 1.9 < 0.55) pts.push([x, y * 0.72]);
+  }
+  return pts;
+})();
+/** nodes that stand outside the force layout: users (column) and the cloud (top left) */
+const outside = (n: { kind: NodeKind }) => n.kind === 'user' || n.kind === 'cloud';
 /** separator inside node ids and group keys (never shown) */
 const SEP = '\u001f';
 const USERS_PER_COLUMN = 28;
+const CLOUD_LABEL = 'uninstrumented callers';
 /** following a user shows what their traces touched in this much playback time (plus what is queued) */
 const USER_PATH_MS = 30000;
 const USER_ROW_GAP = 54;
@@ -260,9 +277,11 @@ export interface Ball {
   rgb: Rgb;
   /** node id of the user whose trace this is, if known */
   user: string | null;
+  /** index into CLOUD_ORIGINS when the trace comes out of the cloud, else -1 */
+  origin: number;
 }
 
-interface Ring {
+export interface Ring {
   x: number;
   y: number;
   rgb: Rgb;
@@ -455,13 +474,14 @@ export class Scene {
 
   // ---- nodes and edges -----------------------------------------------------
   private kindOf(service: string): NodeKind {
-    return service === 'user' ? 'user' : this.kinds.get(service) ?? 'service';
+    return service === 'user' ? 'cloud' : this.kinds.get(service) ?? 'service';
   }
 
   private srcSpec(h: Hop): NodeSpec {
     if (h.f === 'user') {
       if (h.u) return { id: `user${SEP}${h.u.id}`, label: h.u.id, kind: 'user', level: 'user', group: ['users'], owner: 'users', user: h.u };
-      return { id: 'user', label: 'USERS', kind: 'user', level: 'service', group: [], owner: 'user' };
+      // no user and no traceparent: an uninstrumented caller, out of the cloud
+      return { id: 'user', label: CLOUD_LABEL, kind: 'cloud', level: 'service', group: [], owner: 'user' };
     }
     if (this.mode.endpoints && h.fe) {
       return { id: `${h.f}${SEP}${h.fe}`, label: h.fe, kind: this.kindOf(h.f), level: 'endpoint', group: [h.f], owner: h.f };
@@ -517,6 +537,8 @@ export class Scene {
     if (spec.kind === 'user') {
       // users: next free place at the bottom of the users column
       [x, y] = this.nextUserSlot();
+    } else if (spec.kind === 'cloud') {
+      [x, y] = this.cloudSlot();
     } else if (mate) {
       x = mate.x + jitter();
       y = mate.y + jitter();
@@ -532,7 +554,7 @@ export class Scene {
     }
     const r0 = spec.level === 'user' ? 9 : spec.level === 'endpoint' ? 16 : 26;
     // newcomers just appear: in a free spot near where they belong, without moving anybody
-    if (spec.kind !== 'user') [x, y] = this.freeSpot(x, y, r0, 30);
+    if (!outside(spec)) [x, y] = this.freeSpot(x, y, r0, 30);
     n = {
       ...spec,
       x,
@@ -625,7 +647,7 @@ export class Scene {
       if (hideUser && ge.source === 'user') continue;
       if (this.dbServers.has(ge.target)) continue;   // shown as its databases instead
       const spec = (id: string): NodeSpec => ({
-        id, label: id === 'user' ? 'USERS' : id, kind: id === 'user' ? 'user' : this.kindOf(id),
+        id, label: id === 'user' ? CLOUD_LABEL : id, kind: this.kindOf(id),
         level: 'service', group: [], owner: id,
       });
       const e = this.edge(spec(ge.source), spec(ge.target), ge.type);
@@ -658,7 +680,7 @@ export class Scene {
       if (a && b && a !== b) links.push([a, b]);
     }
     const isSink = (o: string) => owners.get(o) === 'database' || owners.get(o) === 'external';
-    const isUser = (o: string) => owners.get(o) === 'user';
+    const isUser = (o: string) => owners.get(o) === 'user' || owners.get(o) === 'cloud';
     const rank = new Map<string, number>();
     for (const o of owners.keys()) rank.set(o, isUser(o) ? 0 : 1);
     for (let iter = 0; iter < owners.size; iter++) {
@@ -761,7 +783,7 @@ export class Scene {
     this.groupMembers = groups;
 
     // users are not simulated: they stand in a column on the left (see layoutUsers)
-    const simNodes = nodes.filter((n) => n.kind !== 'user');
+    const simNodes = nodes.filter((n) => !outside(n));
     const forceGroups = new Map([...groups].filter(([k]) => k !== 'users'));
     const hasUsers = simNodes.length < nodes.length;
 
@@ -774,7 +796,7 @@ export class Scene {
     const links: Link[] = [];
     for (const e of this.edges.values()) {
       const s = this.nodes.get(e.s), t = this.nodes.get(e.t);
-      if (s && t && s !== t && s.kind !== 'user' && t.kind !== 'user') links.push({ source: s, target: t, same: s.owner === t.owner });
+      if (s && t && s !== t && !outside(s) && !outside(t)) links.push({ source: s, target: t, same: s.owner === t.owner });
     }
     const sim = this.sim;
     sim.nodes(simNodes);
@@ -928,7 +950,7 @@ export class Scene {
       const k = Math.min(1, dt * 1.6);
       for (const n of this.nodes.values()) {
         const slot = this.userSlots.get(n.id);
-        if (!slot || n.kind !== 'user') continue;
+        if (!slot || !outside(n)) continue;
         n.x += (slot[0] - n.x) * k;
         n.y += (slot[1] - n.y) * k;
       }
@@ -937,7 +959,7 @@ export class Scene {
       for (const n of this.nodes.values()) {
         n.vx = n.vy = 0;
         const slot = this.userSlots.get(n.id);
-        if (slot && n.kind === 'user') [n.x, n.y] = slot;
+        if (slot && outside(n)) [n.x, n.y] = slot;
       }
       this.arrangeUntil = 0;
     }
@@ -949,9 +971,10 @@ export class Scene {
    */
   private layoutUsers(): void {
     const users = [...this.nodes.values()].filter((n) => n.kind === 'user').sort((a, b) => a.since - b.since);
-    const others = [...this.nodes.values()].filter((n) => n.kind !== 'user');
+    const others = [...this.nodes.values()].filter((n) => !outside(n));
     this.userSlots.clear();
-    if (!users.length) return;
+    const cloud = this.nodes.get('user');
+    if (!users.length && !(cloud && outside(cloud))) return;
     let minX = 0, y0 = 0, y1 = 0;
     if (others.length) {
       minX = Math.min(...others.map((n) => n.x - n.r - (n.group.length ? 40 + n.group.length * 28 : 0)));
@@ -966,6 +989,42 @@ export class Scene {
       this.userSlots.set(n.id, [x0 - col * USER_COLUMN_GAP, cy + (row - (inCol - 1) / 2) * USER_ROW_GAP]);
     });
     this.userColumn = { x: x0, cy };
+    // the cloud floats top left, above the users column
+    const top = users.length ? cy - ((Math.min(USERS_PER_COLUMN, users.length) - 1) / 2) * USER_ROW_GAP : y0;
+    this.cloudPos = [x0 - CLOUD_R * 0.4, Math.min(top, y0) - CLOUD_R - 80];
+    if (cloud && outside(cloud)) this.userSlots.set(cloud.id, this.cloudPos);
+  }
+
+  private cloudPos: Vec2 | null = null;
+
+  /** where the cloud appears before the next arrangement */
+  private cloudSlot(): Vec2 {
+    if (this.cloudPos) return this.cloudPos;
+    const others = [...this.nodes.values()].filter((n) => !outside(n));
+    if (!others.length) return [-CLOUD_R * 2, -CLOUD_R * 1.5];
+    return [Math.min(...others.map((n) => n.x)) - 500, Math.min(...others.map((n) => n.y)) - CLOUD_R - 80];
+  }
+
+  /** world offset of a cloud origin point from the cloud's centre */
+  originOffset(i: number): Vec2 {
+    const o = CLOUD_ORIGINS[i % CLOUD_ORIGINS.length];
+    return [o[0] * CLOUD_R, o[1] * CLOUD_R];
+  }
+
+  /** a ball's position on its way (s: 0 at the caller .. 1 at the callee) with its lane offset */
+  ballAt(b: Ball, s: number, lane: number, out: number[]): number[] {
+    b.edge.at(s, out);
+    let x = out[0] + out[2] * lane, y = out[1] + out[3] * lane;
+    if (b.origin >= 0) {
+      // out of the cloud: start at the trace's own origin point and merge into the edge
+      const [ox, oy] = this.originOffset(b.origin);
+      const w = (1 - s) * (1 - s);
+      x += ox * w;
+      y += oy * w;
+    }
+    out[0] = x;
+    out[1] = y;
+    return out;
   }
 
   /** where a newly arrived user stands until the next arrangement: below the last one */
@@ -1044,6 +1103,7 @@ export class Scene {
     const user = hops.find((th) => th.h.u)?.h.u;
     const rgb = user ? toLin(userRgb(user.id)) : traceRgb(hops[0].h.tr);
     const userId = user ? `user${SEP}${user.id}` : null;
+    const origin = Math.floor(Math.random() * CLOUD_ORIGINS.length);
     // parent = the latest earlier hop into our caller (earlier in sorted order, so no cycles)
     const intoService = new Map<string, TraceHop[]>();
     for (const th of hops) {
@@ -1073,7 +1133,7 @@ export class Scene {
       }
       const ret = ready;
       if (depart >= cutoff) {
-        this.queue.push({ hop: h, edge: e, src: e.s, dst: e.t, depart, arrive, ret, back: ret + T, phase: 0, err: h.e, slow: h.d > 250, rgb, user: userId });
+        this.queue.push({ hop: h, edge: e, src: e.s, dst: e.t, depart, arrive, ret, back: ret + T, phase: 0, err: h.e, slow: h.d > 250, rgb, user: userId, origin: this.nodes.get(e.s)?.kind === 'cloud' ? origin : -1 });
         if (userId) this.notePath(userId, e, depart);
       }
       return ret + T;
@@ -1214,6 +1274,13 @@ export class Scene {
     if (srv) srv.inflight = Math.max(0, srv.inflight - 1);
     if (!n || this.quiet(b)) return;
     const code = h.c || (b.err ? 'ERR' : 'OK');
+    if (b.origin >= 0) {
+      // back into the cloud: a small flash at the origin point, red if it failed
+      const [ox, oy] = this.originOffset(b.origin);
+      this.ring(n.x + ox, n.y + oy, b.err ? RED : b.rgb, 2, 18, 0.5, 0.6);
+      if (b.err) this.burst(n.x + ox, n.y + oy, 24, RED, 200, 0.6, 1.8);
+      return;
+    }
     if (b.err) {
       this.burst(n.x, n.y, 40, RED, 300, 0.8, 2.2);
       this.ring(n.x, n.y, RED, n.r, n.r * 2.4, 0.6);
@@ -1246,7 +1313,7 @@ export class Scene {
     for (const n of this.nodes.values()) {
       const r = n.level === 'user' ? 8 + 2 * Math.log10(1 + n.outRate * 20)
         : n.level === 'endpoint' ? (n.kind === 'database' ? 13 : 15) + 4 * Math.log10(1 + n.rate * 4)
-          : n.id === 'user' ? 38
+          : n.kind === 'cloud' ? CLOUD_R
             : (n.kind === 'service' ? 31 : 26) + 6 * Math.log10(1 + n.rate * 4);
       n.r += (r - n.r) * k;
       n.alpha = n.dying ? Math.max(0, n.alpha - dt * 1.2) : Math.min(1, n.alpha + dt * 1.5);
@@ -1378,7 +1445,7 @@ export class Scene {
       const errf = e.rate > 0 ? Math.min(1, (e.err / e.rate) * 4) : 0;
       let col = [0.16 + 0.84 * errf, 0.24 - 0.14 * errf, 0.42 - 0.3 * errf];
       if (this.hoverEdge === e.key) col = col.map((c) => c * 2.2);
-      const user = a.level === 'user';
+      const user = a.level === 'user' || a.kind === 'cloud';
       // edges stay in the background: thin and faint, the balls are the show
       const alpha = Math.min(a.alpha, b.alpha) * (lit ? 0.5 : 0.1) * (focusId && lit ? 1.8 : 1) * (user ? 0.5 : 1);
       const width = user ? 0.5 : 0.6 + 1.2 * Math.log10(1 + e.rate * 2);
@@ -1414,8 +1481,8 @@ export class Scene {
       for (let g = ghosts; g >= 0; g--) {
         const u = (play - t0 - g * 16) / dur;
         if (u < 0 || u > 1) continue;
-        b.edge.at(req ? u : 1 - u, tmp);
-        const x = tmp[0] + tmp[2] * lane, y = tmp[1] + tmp[3] * lane;
+        this.ballAt(b, req ? u : 1 - u, lane, tmp);
+        const x = tmp[0], y = tmp[1];
         const fade = 1 - g / (ghosts + 1);
         if (g === 0) o.under.push(x, y, size, 0, rgb[0], rgb[1], rgb[2], dim);
         else o.under.push(x, y, size * (0.25 + 0.75 * fade), 2, rgb[0], rgb[1], rgb[2], 0.5 * fade * fade * dim);
@@ -1430,7 +1497,15 @@ export class Scene {
       o.nodes.push(n.x + sx, n.y + sy, n.r, n.pulse, n.lin[0], n.lin[1], n.lin[2], err,
         0, heat, KIND[n.kind], n.alpha * dimOf(n.id),
         n.flash, n.id === focusId ? 1 : 0, 0, 0);
-      if (heat > 0.02 && n.level !== 'user' && o.heat.count < 64) {
+      if (n.kind === 'cloud') {
+        // the cloud's origin points twinkle faintly
+        for (let i = 0; i < CLOUD_ORIGINS.length; i++) {
+          const [ox, oy] = this.originOffset(i);
+          const tw = 0.5 + 0.5 * Math.sin(this.time * (0.7 + (i % 7) * 0.23) + i * 1.7);
+          o.under.push(n.x + ox, n.y + oy, 2.2, 2, n.lin[0], n.lin[1], n.lin[2], (0.12 + 0.18 * tw) * n.alpha * dimOf(n.id));
+        }
+      }
+      if (heat > 0.02 && n.level !== 'user' && n.kind !== 'cloud' && o.heat.count < 64) {
         o.heat.push(n.x, n.y, n.r * 2.6, 0.022 * heat * dimOf(n.id), n.lin[0], n.lin[1], n.lin[2], 0);
       }
     }

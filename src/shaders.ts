@@ -198,7 +198,8 @@ struct NOut {
 };
 
 @vertex fn vs(@builtin(vertex_index) vi: u32, n: NIn) -> NOut {
-  let ext = n.a.z * 2.6 + 24.0;
+  // the cloud is drawn inside its radius; everything else needs room for halo and rings
+  let ext = select(n.a.z * 2.6 + 24.0, n.a.z * 1.15, i32(n.c.z + 0.5) == 4);
   let local = quad(vi) * ext;
   var o: NOut;
   o.pos = toClip(n.a.xy + local);
@@ -223,8 +224,26 @@ fn angDiff(a: f32, b: f32) -> f32 {
   let hover = in.d.y;
   let t = G.screen.z;
 
-  let d = length(in.local);
+  // databases are octagons (distance to a regular octagon with inradius r), the rest circles
+  var d = length(in.local);
+  if (kind == 1) {
+    let p = abs(in.local);
+    d = max(max(p.x, p.y), (p.x + p.y) * 0.70710678);
+  }
   let aa = max(fwidth(d), 1e-3);
+
+  // the cloud of uninstrumented callers: soft, drifting, no ring
+  if (kind == 4) {
+    let q = in.local / r;
+    let tt = t * 0.03;
+    let n1 = fbm(q * 1.7 + vec2f(tt, -tt * 0.7));
+    let n2 = fbm(q * 3.3 - vec2f(tt * 1.3, tt) + 11.0);
+    let e = length(q * vec2f(1.0, 1.35)) + (n1 - 0.5) * 0.75;
+    let shape = 1.0 - smoothstep(0.3, 0.95, e);
+    let dens = shape * (0.45 + 0.55 * n2);
+    let c = mix(vec3f(0.05, 0.06, 0.11), hue * 0.55, n2) * (0.7 + pulse * 0.6 + hover * 0.3);
+    return vec4f(c * dens * 0.5, dens * 0.5) * alpha;
+  }
   let ang = atan2(in.local.x, -in.local.y);          // 0 at top, clockwise
   let a01 = fract(ang / 6.2831853 + 1.0);
   let ringW = 3.2 + hover * 1.2;
