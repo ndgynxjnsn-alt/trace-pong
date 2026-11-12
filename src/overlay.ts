@@ -227,6 +227,14 @@ function nodePath(c: CanvasRenderingContext2D, n: SceneNode, x: number, y: numbe
       c.lineTo(x + Math.cos(a) * R, y + Math.sin(a) * R);
     }
     c.closePath();
+  } else if (n.kind === 'service' || n.kind === 'external') {
+    // pointy-top hexagon, inradius r
+    const R = r / Math.cos(Math.PI / 6);
+    for (let i = 0; i < 6; i++) {
+      const a = -Math.PI / 2 + (i * Math.PI) / 3;
+      c.lineTo(x + Math.cos(a) * R, y + Math.sin(a) * R);
+    }
+    c.closePath();
   } else {
     c.arc(x, y, r, 0, Math.PI * 2);
   }

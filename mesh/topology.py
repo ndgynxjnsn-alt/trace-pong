@@ -235,3 +235,35 @@ INCIDENTS = [
     ("auth", "errors", 0.2),         # token validation fails
     ("catalog", "latency", 4.0),
 ]
+
+
+# Each service pretends to run a different stack, so the panel can group alike nodes: the
+# language goes into telemetry.sdk.language, and spans come from the instrumentation scopes the
+# real agents use (server, HTTP client, database client, Kafka client).
+SCOPES = {
+    "java": {
+        "server": "io.opentelemetry.spring-webmvc-6.0", "client": "io.opentelemetry.java-http-client",
+        "db": "io.opentelemetry.jdbc", "kafka": "io.opentelemetry.kafka-clients-2.6",
+    },
+    "go": {
+        "server": "go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp",
+        "client": "go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp",
+        "db": "go.opentelemetry.io/contrib/instrumentation/database/sql",
+        "kafka": "github.com/IBM/sarama/otelsarama",
+    },
+    "nodejs": {
+        "server": "@opentelemetry/instrumentation-express", "client": "@opentelemetry/instrumentation-http",
+        "db": "@opentelemetry/instrumentation-pg", "kafka": "@opentelemetry/instrumentation-kafkajs",
+    },
+    "python": {
+        "server": "opentelemetry.instrumentation.flask", "client": "opentelemetry.instrumentation.requests",
+        "db": "opentelemetry.instrumentation.psycopg2", "kafka": "opentelemetry.instrumentation.kafka-python",
+    },
+}
+STACKS = {
+    "gateway": "go", "shipping": "go",
+    "auth": "java", "account": "java", "catalog": "java", "inventory": "java", "checkout": "java",
+    "payment": "java", "notification": "java",
+    "cart": "nodejs", "pricing": "nodejs", "currency": "nodejs",
+    "search": "python", "recommendation": "python", "fraud": "python",
+}

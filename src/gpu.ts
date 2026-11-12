@@ -6,6 +6,7 @@ const HDR: GPUTextureFormat = 'rgba16float';
 export const MAX_SPARKS = 1 << 15;
 export const SPARK_FLOATS = 12;
 const MAX_HEAT = 64;
+const MAX_PIXELS = 3840 * 2160;
 
 const premul: GPUBlendState = {
   color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
@@ -23,6 +24,8 @@ export interface Frame {
   time: number;
   dt: number;
   dim: number;
+  /** honeycomb cell size in world units (background grid) */
+  cell: number;
   nodes: Float32Array<ArrayBuffer>;
   nodeCount: number;
   edges: Float32Array<ArrayBuffer>;
@@ -56,7 +59,8 @@ export class Renderer {
     const gpu = navigator.gpu;
     if (!gpu) throw new Error('WebGPU is not available in this browser.');
     const problems: string[] = [];
-    const tried = new Set<GPUAdapter>();
+    // Firefox hands out a new adapter object per request: recognise the same GPU by its info
+    const tried = new Set<string>();
     for (const pref of ['high-performance', undefined, 'low-power'] as (GPUPowerPreference | undefined)[]) {
       const label = pref ?? 'default';
       let adapter: GPUAdapter | null = null;
@@ -70,8 +74,10 @@ export class Renderer {
         problems.push(`${label}: no adapter`);
         continue;
       }
-      if (tried.has(adapter)) continue;
-      tried.add(adapter);
+      const report = describeAdapter(adapter, label);
+      const key = JSON.stringify(report.info) + report.features.join();
+      if (tried.has(key)) continue;
+      tried.add(key);
       let device: GPUDevice | null = null;
       try {
         device = await adapter.requestDevice();
@@ -79,7 +85,7 @@ export class Renderer {
         device.pushErrorScope('internal');
         device.pushErrorScope('validation');
         const r = new Renderer(device, canvas);
-        r.adapter = describeAdapter(adapter, label);
+        r.adapter = report;
         r.resize(Math.max(1, canvas.clientWidth), Math.max(1, canvas.clientHeight));
         const errors = [await device.popErrorScope(), await device.popErrorScope(), await device.popErrorScope()].filter(Boolean);
         if (errors.length) throw new Error(errors.map((x) => x?.message).join(' / '));
@@ -122,10 +128,15 @@ export class Renderer {
   readonly device: GPUDevice;
   /** what the browser gave us, for the debug view */
   adapter: AdapterReport = { preference: '', info: {}, features: [], limits: {} };
-  /** ms from submitting a frame until the GPU finished it (sampled), null until measured */
+  /** ms from submitting a frame until the GPU finished it, null until measured */
   gpuMs: number | null = null;
-  private gpuPending = false;
-  private frameNo = 0;
+  /** submit times of frames the GPU has not finished yet */
+  private inFlight: number[] = [];
+  /** frames skipped because the GPU was still busy with earlier ones */
+  skipped = 0;
+  private dtCarry = 0;
+  /** canvas resolution actually used relative to the requested one (texture and memory limits) */
+  clampScale = 1;
   /** spark spawns as [scene clock, count], to draw only the part of the ring that can be alive */
   private sparkLog: [number, number][] = [];
   private sparkClock = 0;
@@ -266,8 +277,13 @@ export class Renderer {
 
   /** (Re)create the HDR target and the bloom mip chain for the canvas pixel size. */
   resize(width: number, height: number): void {
-    const w = Math.max(1, Math.floor(width));
-    const h = Math.max(1, Math.floor(height));
+    // stay inside the device's texture size and about 4K worth of pixels: the HDR target and its
+    // bloom chain cost ~10 bytes per pixel, which adds up on integrated GPUs
+    const maxDim = this.device.limits.maxTextureDimension2D;
+    const k = Math.min(1, maxDim / Math.max(1, width), maxDim / Math.max(1, height), Math.sqrt(MAX_PIXELS / Math.max(1, width * height)));
+    this.clampScale = k;
+    const w = Math.max(1, Math.floor(width * k));
+    const h = Math.max(1, Math.floor(height * k));
     if (w === this.size[0] && h === this.size[1]) return;
     this.size = [w, h];
     this.canvas.width = w;
@@ -352,15 +368,30 @@ export class Renderer {
     }
   }
 
-  render(f: Frame): void {
-    if (!this.hdrView || !this.bgComp) return;
+  /**
+   * Draw a frame. Returns false when it was skipped: never more than two frames queued on the GPU,
+   * otherwise a slow GPU makes the browser buffer frame after frame (and their uploads) until
+   * memory runs out.
+   */
+  render(f: Frame): boolean {
+    if (!this.hdrView || !this.bgComp) return false;
+    const now = performance.now();
+    // a frame the GPU has not reported in 1 s is not waited for any longer
+    this.inFlight = this.inFlight.filter((t) => now - t < 1000);
+    if (this.inFlight.length >= 2) {
+      this.skipped++;
+      this.dtCarry += f.dt;
+      return false;
+    }
+    f = { ...f, dt: f.dt + this.dtCarry };
+    this.dtCarry = 0;
     const d = this.device;
     const [w, h] = this.size;
-    const dpr = f.dpr;
+    const dpr = f.dpr * this.clampScale;
     d.queue.writeBuffer(this.globals, 0, new Float32Array([
       f.cam.x, f.cam.y, f.cam.zoom, dpr,
       w / dpr, h / dpr, f.time, f.dt,
-      f.dim, 0, 0, 0,
+      f.dim, f.cell, 0, 0,
       0, 0, 0, 0,
     ]));
     const heat = new Float32Array(4 + MAX_HEAT * 8);
@@ -439,16 +470,18 @@ export class Renderer {
     for (const p of this.upPasses) pass(this.pUp, p.dst, p.bg, true);
     pass(this.pComp, this.ctx.getCurrentTexture().createView(), this.bgComp, false);
     d.queue.submit([enc.finish()]);
-    // sample how long the GPU takes for a frame (submit -> done), a few times per second
-    if (!this.gpuPending && this.frameNo++ % 15 === 0) {
-      this.gpuPending = true;
-      const t0 = performance.now();
-      d.queue.onSubmittedWorkDone().then(() => {
-        const ms = performance.now() - t0;
-        this.gpuMs = this.gpuMs === null ? ms : this.gpuMs * 0.7 + ms * 0.3;
-        this.gpuPending = false;
-      }, () => { this.gpuPending = false; });
-    }
+    const t0 = performance.now();
+    this.inFlight.push(t0);
+    const done = () => {
+      const i = this.inFlight.indexOf(t0);
+      if (i >= 0) this.inFlight.splice(i, 1);
+    };
+    d.queue.onSubmittedWorkDone().then(() => {
+      const ms = performance.now() - t0;
+      this.gpuMs = this.gpuMs === null ? ms : this.gpuMs * 0.9 + ms * 0.1;
+      done();
+    }, done);
+    return true;
   }
 }
 

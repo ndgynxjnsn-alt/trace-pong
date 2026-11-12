@@ -33,6 +33,10 @@ export interface Hop {
   te?: string;
   /** callee's group path for the endpoint view, e.g. ['gateway'] or ['postgres', 'users_db'] */
   tg?: string[];
+  /** caller's type (language · framework of its endpoint), for grouping alike nodes */
+  ft?: string;
+  /** callee's type: language · framework, the database system, or 'external' */
+  tt?: string;
   /** the end user, when the caller is a user (f === 'user') */
   u?: UserInfo;
 }
@@ -109,6 +113,8 @@ export interface PanelOptions {
   maxTraces: number;
   /** percent of traces to fetch, chosen by trace id (the same traces for every viewer) */
   sampling: number;
+  /** replay each sampled trace 100/sampling times, so the picture looks unsampled */
+  interpolate: boolean;
   /** node renames, one `from = to` per line */
   rename: string;
   showClock: boolean;

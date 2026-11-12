@@ -60,6 +60,23 @@ const ANON = ['GET /api/products', 'GET /api/products/{id}', 'GET /api/search', 
 const ERR: Record<string, number> = { payment: 0.04, inventory: 0.02, auth: 0.02, catalog: 0.01 };
 const FRONTEND = 'shop-web';
 
+/** language and HTTP framework per service (the same stacks the demo mesh reports) */
+const STACK: Record<string, [string, string]> = {
+  'shop-web': ['webjs', 'faro'], gateway: ['go', 'otelhttp'], shipping: ['go', 'otelhttp'],
+  auth: ['java', 'spring-webmvc'], account: ['java', 'spring-webmvc'], catalog: ['java', 'spring-webmvc'],
+  inventory: ['java', 'spring-webmvc'], checkout: ['java', 'spring-webmvc'], payment: ['java', 'spring-webmvc'],
+  notification: ['java', 'spring-webmvc'],
+  cart: ['nodejs', 'express'], pricing: ['nodejs', 'express'], currency: ['nodejs', 'express'],
+  search: ['python', 'flask'], recommendation: ['python', 'flask'], fraud: ['python', 'flask'],
+};
+const DB_SYSTEM: Record<string, string> = { postgres: 'postgresql', redis: 'redis', elasticsearch: 'elasticsearch' };
+/** an endpoint's type: queue consumers ("<topic> process") run on the Kafka client */
+function techOf(svc: string, route: string): string | undefined {
+  const st = STACK[svc];
+  if (!st) return undefined;
+  return `${st[0]} · ${route.endsWith(' process') ? 'kafka-clients' : st[1]}`;
+}
+
 interface Incident { svc: string; kind: 'err' | 'slow' }
 const INCIDENTS: Incident[] = [{ svc: 'payment', kind: 'err' }, { svc: 'search', kind: 'slow' }, { svc: 'inventory', kind: 'err' }, { svc: 'currency', kind: 'slow' }];
 
@@ -132,7 +149,10 @@ export class SimSource implements Source {
     const slow = this.incident?.svc === svc && this.incident.kind === 'slow' ? 5 : 1;
     let now = t + lognorm(1.5) * slow;
     let err = false;
-    const me: Hop = { t, d: 0, f: from, to: svc, n: route, c: 200, e: false, k: 'http', tr, fe: fromEp, te: route, tg: [svc] };
+    const me: Hop = {
+      t, d: 0, f: from, to: svc, n: route, c: 200, e: false, k: route.endsWith(' process') ? 'messaging' : 'http', tr,
+      fe: fromEp, te: route, tg: [svc], ft: techOf(from, fromEp), tt: techOf(svc, route),
+    };
     hops.push(me);
     for (const s of steps) {
       if (Math.random() > s.p) continue;
@@ -145,9 +165,15 @@ export class SimSource implements Source {
         if ('server' in s) {
           // Tempo names the virtual node after db.name, else db.system
           const to = s.db ?? s.server;
-          hops.push({ t: now, d, f: svc, to, n: `${s.op} ${s.table}`, c: 0, e: false, k: 'db', tr, fe: route, te: s.table, tg: s.db ? [s.server, s.db] : [s.server] });
+          hops.push({
+            t: now, d, f: svc, to, n: `${s.op} ${s.table}`, c: 0, e: false, k: 'db', tr, fe: route, te: s.table,
+            tg: s.db ? [s.server, s.db] : [s.server], ft: techOf(svc, route), tt: DB_SYSTEM[s.server] ?? s.server,
+          });
         } else {
-          hops.push({ t: now, d, f: svc, to: s.ext, n: s.op, c: 200, e: false, k: 'ext', tr, fe: route, te: s.op, tg: [s.ext] });
+          hops.push({
+            t: now, d, f: svc, to: s.ext, n: s.op, c: 200, e: false, k: 'ext', tr, fe: route, te: s.op, tg: [s.ext],
+            ft: techOf(svc, route), tt: 'external',
+          });
         }
         now += d + 0.1;
       }
@@ -180,7 +206,10 @@ export class SimSource implements Source {
       }
       const [route, , view] = pickWeighted(MIX, (m) => m[1]);
       // the user's click in the browser (Faro root span), then the fetch to the gateway
-      const ui: Hop = { t, d: 0, f: 'user', to: FRONTEND, n: view, c: 200, e: false, k: 'http', tr, te: view, tg: [FRONTEND], u: this.pickUser(now) };
+      const ui: Hop = {
+        t, d: 0, f: 'user', to: FRONTEND, n: view, c: 200, e: false, k: 'http', tr, te: view, tg: [FRONTEND],
+        u: this.pickUser(now), tt: techOf(FRONTEND, view),
+      };
       hops.push(ui);
       const api = this.call(FRONTEND, view, 'gateway', route, t + 2 + Math.random() * 3, tr, hops);
       ui.d = api.t + api.d - t + 1;

@@ -61,8 +61,8 @@ interface OtlpTrace {
 }
 interface OtlpResourceSpans {
   resource?: { attributes?: OtlpAttr[] };
-  scopeSpans?: { spans?: OtlpSpan[] }[];
-  instrumentationLibrarySpans?: { spans?: OtlpSpan[] }[];
+  scopeSpans?: { scope?: { name?: string }; spans?: OtlpSpan[] }[];
+  instrumentationLibrarySpans?: { instrumentationLibrary?: { name?: string }; spans?: OtlpSpan[] }[];
 }
 
 export class TempoSource implements Source {
@@ -78,7 +78,7 @@ export class TempoSource implements Source {
   private known = new Set<string>();
   private stopped = false;
   /** debug counters: decayed per-second rates and totals */
-  private counts = { found: 0, sampledOut: 0, fetched: 0, failed: 0, hops: 0, capped: 0 };
+  private counts = { found: 0, sampledOut: 0, fetched: 0, failed: 0, hops: 0, capped: 0, shown: 0 };
   private countsSince = Date.now();
   private gt?: ReturnType<typeof setTimeout>;
   private ht?: ReturnType<typeof setTimeout>;
@@ -103,11 +103,13 @@ export class TempoSource implements Source {
       'dropped by cap': rate(c.capped),
       'traces fetched': rate(c.fetched),
       'fetch errors': rate(c.failed),
+      interpolation: this.o.interpolate ? 'on' : 'off',
+      'traces shown': rate(c.shown),
       hops: rate(c.hops),
     };
     if (secs >= 10) {
       this.lastStats = now;
-      this.counts = { found: 0, sampledOut: 0, fetched: 0, failed: 0, hops: 0, capped: 0 };
+      this.counts = { found: 0, sampledOut: 0, fetched: 0, failed: 0, hops: 0, capped: 0, shown: 0 };
       this.countsSince = Date.now();
     }
     return this.lastStats ?? now;
@@ -235,11 +237,13 @@ export class TempoSource implements Source {
       q, limit: 400, spss: 1, start: Math.floor(now - 120), end: Math.floor(now + 60),
     });
     const fresh: [number, string][] = [];
+    let found = 0;
     for (const t of res.traces ?? []) {
       const start = Number(BigInt(t.startTimeUnixNano) / 1000000n) / 1000;
       const end = start + (t.durationMs ?? 0) / 1000;
       if (this.seen.has(t.traceID) || now - end < LAG) continue;
       this.counts.found++;
+      found++;
       if (!keepTrace(t.traceID, this.o.sampling)) {
         // decided once per trace: never look at it again
         this.seen.set(t.traceID, now);
@@ -256,14 +260,15 @@ export class TempoSource implements Source {
       for (const k of [...this.seen.keys()].slice(0, this.seen.size - 20000)) this.seen.delete(k);
     }
 
-    const hops: Hop[] = [];
+    const traces: Hop[][] = [];
     let i = 0;
     const worker = async () => {
       while (i < ids.length && !this.stopped) {
         const id = ids[i++];
         try {
           const d = await this.env.get<{ trace?: OtlpTrace } & OtlpTrace>(`${this.o.tempoUrl}/api/v2/traces/${id}`);
-          hops.push(...hopsFromTrace(d.trace ?? d, this.known));
+          const th = hopsFromTrace(d.trace ?? d, this.known);
+          if (th.length) traces.push(th);
           this.counts.fetched++;
         } catch {
           this.counts.failed++;
@@ -272,13 +277,47 @@ export class TempoSource implements Source {
       }
     };
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, ids.length) }, worker));
-    if (this.stopped || !hops.length) return;
+    if (this.stopped || !traces.length) return;
+    // Interpolation: every fetched trace stands for found/fetched traces (10 at 10% sampling), so
+    // replay it that many times, at random starts within the time this poll covers.
+    const shown = this.o.interpolate ? interpolate(traces, found / traces.length) : traces;
+    this.counts.shown += shown.length;
+    const hops = shown.flat();
     this.tracesSeen = true;
     this.counts.hops += hops.length;
     hops.sort((a, b) => a.t - b.t);
     this.scene.ingest(hops, Date.now(), this.first);
     this.first = false;
   }
+}
+
+/** most copies of one trace, whatever the ratio */
+const MAX_COPIES = 50;
+
+/**
+ * Replay each trace `ratio` times on average (fractions by chance): the original, plus copies with
+ * their own trace id, shifted to a random start between the earliest trace start and at least one
+ * poll later. Copies keep the user, so a user's colour and path stay right.
+ */
+export function interpolate(traces: Hop[][], ratio: number): Hop[][] {
+  if (!(ratio > 1.01)) return traces;
+  const r = Math.min(MAX_COPIES, ratio);
+  let t0 = Infinity, t1 = -Infinity;
+  for (const tr of traces) {
+    t0 = Math.min(t0, tr[0].t);
+    t1 = Math.max(t1, tr[0].t);
+  }
+  const span = Math.max(POLL, t1 - t0);
+  const out: Hop[][] = [];
+  for (const tr of traces) {
+    out.push(tr);
+    const n = Math.floor(r) + (Math.random() < r - Math.floor(r) ? 1 : 0);
+    for (let k = 1; k < n; k++) {
+      const shift = t0 + Math.random() * span - tr[0].t;
+      out.push(tr.map((h) => ({ ...h, t: h.t + shift, tr: `${h.tr}~${k}` })));
+    }
+  }
+  return out;
 }
 
 function errText(e: unknown): string {
@@ -317,6 +356,10 @@ function traceHex(id: string): string {
 }
 
 interface Span extends OtlpSpan {
+  /** telemetry.sdk.language (or process.runtime.name) of the span's resource */
+  lang?: string;
+  /** instrumentation scope, e.g. io.opentelemetry.spring-webmvc-6.0 */
+  scope?: string;
   svc: string;
   attrs: Record<string, AttrValue>;
 }
@@ -338,6 +381,24 @@ function userOf(a: Record<string, AttrValue>): UserInfo | undefined {
   };
 }
 
+/**
+ * Short name of an instrumentation scope: io.opentelemetry.spring-webmvc-6.0 -> spring-webmvc,
+ * opentelemetry.instrumentation.flask -> flask, go.opentelemetry.io/contrib/.../otelhttp -> otelhttp.
+ */
+export function shortScope(scope: string | undefined): string | undefined {
+  if (!scope) return undefined;
+  let s = scope.split('/').pop() ?? scope;
+  s = s.replace(/^(io\.opentelemetry\.(javaagent\.)?|opentelemetry\.instrumentation\.|instrumentation-)/, '');
+  s = s.replace(/-\d+(\.\d+)*$/, '');
+  return s || undefined;
+}
+
+/** A node's type for grouping: language and framework, e.g. "java · spring-webmvc". */
+function techOf(s: Span): string | undefined {
+  const parts = [s.lang, shortScope(s.scope)].filter(Boolean);
+  return parts.length ? parts.join(' · ') : undefined;
+}
+
 /** Table/collection from a SQL statement, when no db.collection.name is set. */
 function tableFromQuery(q: string | undefined): string | undefined {
   const m = q?.match(/\b(?:from|into|update|join)\s+[`"[]?([\w.$-]+)/i);
@@ -349,10 +410,15 @@ export function hopsFromTrace(tr: OtlpTrace, known: Set<string> = new Set()): Ho
   const spans = new Map<string, Span>();
   const children = new Map<string, Span[]>();
   for (const rs of tr.resourceSpans ?? tr.batches ?? []) {
-    const svc = String(attrMap(rs.resource?.attributes)['service.name'] ?? 'unknown');
-    for (const ss of rs.scopeSpans ?? rs.instrumentationLibrarySpans ?? []) {
+    const res = attrMap(rs.resource?.attributes);
+    const svc = String(res['service.name'] ?? 'unknown');
+    const lang = str(res['telemetry.sdk.language']) ?? str(res['process.runtime.name']);
+    const scopes: { scope?: { name?: string }; instrumentationLibrary?: { name?: string }; spans?: OtlpSpan[] }[] =
+      rs.scopeSpans ?? rs.instrumentationLibrarySpans ?? [];
+    for (const ss of scopes) {
+      const scope = ss.scope?.name ?? ss.instrumentationLibrary?.name;
       for (const raw of ss.spans ?? []) {
-        const s: Span = { ...raw, svc, attrs: attrMap(raw.attributes) };
+        const s: Span = { ...raw, svc, lang, scope, attrs: attrMap(raw.attributes) };
         spans.set(s.spanId, s);
         if (s.parentSpanId) {
           let list = children.get(s.parentSpanId);
@@ -365,16 +431,22 @@ export function hopsFromTrace(tr: OtlpTrace, known: Set<string> = new Set()): Ho
 
   // The endpoint a span belongs to: the nearest server span of the same service above it, or for
   // a frontend (no server span), the root's view name.
-  const endpointOf = (span: Span): string => {
+  const endpointSpan = (span: Span): Span => {
     let cur: Span | undefined = span;
     let top = span;
     for (let depth = 0; cur && cur.svc === span.svc && depth < 200; depth++) {
-      if (isServer(cur.kind)) return cur.name;
+      if (isServer(cur.kind)) return cur;
       top = cur;
       cur = cur.parentSpanId ? spans.get(cur.parentSpanId) : undefined;
     }
-    return str(top.attrs['view.name']) ?? top.name;
+    return top;
   };
+  const endpointOf = (span: Span): string => {
+    const e = endpointSpan(span);
+    return isServer(e.kind) ? e.name : str(e.attrs['view.name']) ?? e.name;
+  };
+  /** the caller's type: language and framework of the endpoint the call is made from */
+  const callerTech = (span: Span) => techOf(endpointSpan(span));
 
   const hops: Hop[] = [];
   const emit = (src: string, dst: string, s: Span, k: HopKind, extra: Partial<Hop>) => {
@@ -396,19 +468,20 @@ export function hopsFromTrace(tr: OtlpTrace, known: Set<string> = new Set()): Ho
       // root span with Faro's user meta
       const u = userOf(s.attrs);
       if (isServer(s.kind)) {
-        emit('user', s.svc, s, 'http', { te: s.name, tg: [s.svc], u });
+        emit('user', s.svc, s, 'http', { te: s.name, tg: [s.svc], u, tt: techOf(s) });
         continue;
       }
       if (u) {
         const view = str(s.attrs['view.name']) ?? s.name;
-        emit('user', s.svc, s, 'http', { te: view, tg: [s.svc], u, n: view });
+        emit('user', s.svc, s, 'http', { te: view, tg: [s.svc], u, n: view, tt: techOf(s) });
       }
     }
     if (isServer(s.kind)) {
       const p = s.parentSpanId ? spans.get(s.parentSpanId) : undefined;
       if (!p) continue;   // parent not (yet) in the trace
       if (isClient(p.kind) && p.svc !== s.svc) {
-        emit(p.svc, s.svc, s, s.kind === 'SPAN_KIND_CONSUMER' ? 'messaging' : 'http', { fe: endpointOf(p), te: s.name, tg: [s.svc] });
+        emit(p.svc, s.svc, s, s.kind === 'SPAN_KIND_CONSUMER' ? 'messaging' : 'http',
+          { fe: endpointOf(p), te: s.name, tg: [s.svc], ft: callerTech(p), tt: techOf(s) });
       }
     } else if (s.kind === 'SPAN_KIND_CLIENT') {
       if ((children.get(s.spanId) ?? []).some((k) => isServer(k.kind))) continue;
@@ -428,9 +501,12 @@ export function hopsFromTrace(tr: OtlpTrace, known: Set<string> = new Set()): Ho
         const cands = ['server.address', 'peer.service', 'db.name', 'db.namespace', 'db.system', 'net.peer.name']
           .map((k) => str(a[k])).filter((v): v is string => !!v);
         const to = cands.find((c) => known.has(c)) ?? cands[0] ?? String(peer);
-        emit(s.svc, to, s, 'db', { fe, te: table ?? str(a['db.operation.name']) ?? str(a['db.operation']) ?? s.name, tg });
+        emit(s.svc, to, s, 'db', {
+          fe, te: table ?? str(a['db.operation.name']) ?? str(a['db.operation']) ?? s.name, tg,
+          ft: callerTech(s), tt: str(a['db.system']),
+        });
       } else {
-        emit(s.svc, String(peer), s, 'ext', { fe, te: s.name, tg: [String(peer)] });
+        emit(s.svc, String(peer), s, 'ext', { fe, te: s.name, tg: [String(peer)], ft: callerTech(s), tt: 'external' });
       }
     }
   }

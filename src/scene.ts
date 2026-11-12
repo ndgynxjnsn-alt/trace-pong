@@ -103,6 +103,12 @@ const USERS_PER_COLUMN = 28;
 const CLOUD_LABEL = 'Mystery Cloud';
 /** following a user shows what their traces touched in this much playback time (plus what is queued) */
 const USER_PATH_MS = 30000;
+/** honeycomb: distance between neighbouring cells, and the row height factor (√3/2) */
+const HEX_SERVICES = 128;
+const HEX_ENDPOINTS = 78;
+const HEX_ROW = Math.sqrt(3) / 2;
+/** ingest stops adding traces while this many balls are queued or flying (memory and CPU guard) */
+const MAX_BALLS = 12000;
 const USER_ROW_GAP = 54;
 const USER_COLUMN_GAP = 300;
 /** time constant (s) of the hop-based statistics */
@@ -219,6 +225,8 @@ export interface SceneNode extends SimulationNodeDatum {
   /** top-level owner (service, server or 'users'); decides layout rank and colour */
   owner: string;
   user?: UserInfo;
+  /** type for grouping alike nodes: "java · spring-webmvc", "postgresql", "external", ... */
+  tech?: string;
   x: number;
   y: number;
   r: number;
@@ -259,6 +267,7 @@ interface NodeSpec {
   group: string[];
   owner: string;
   user?: UserInfo;
+  tech?: string;
 }
 
 /** A hop scheduled for playback: depart -> arrive (request), held, ret -> back (response). */
@@ -392,8 +401,18 @@ export class Scene {
   private nextArrange = 0;
   private arrangeSoon = false;
   private firstData = 0;
-  private tickAcc = 0;
   private readonly userSlots = new Map<string, Vec2>();
+  /** planned honeycomb cell of every simulated node */
+  private homes = new Map<string, Vec2>();
+  /** positions at the start of the glide to the new homes */
+  private glideFrom = new Map<string, Vec2>();
+  /** copies of the nodes the force simulation moves while the shown nodes keep still */
+  private clones = new Map<string, SceneNode>();
+  /** the simulation is running ahead (spread over a few frames) before the glide starts */
+  private planning = false;
+  private glideStart = 0;
+  /** traces skipped because too many balls were around */
+  droppedTraces = 0;
   /** per user node: nodes and edges their traces touch, with the latest (playback) time (for following a user) */
   private readonly userPaths = new Map<string, { nodes: Map<string, number>; edges: Map<string, number> }>();
   private userColumn: { x: number; cy: number } | null = null;
@@ -487,16 +506,16 @@ export class Scene {
       return { id: 'user', label: CLOUD_LABEL, kind: 'cloud', level: 'service', group: [], owner: 'user' };
     }
     if (this.mode.endpoints && h.fe) {
-      return { id: `${h.f}${SEP}${h.fe}`, label: h.fe, kind: this.kindOf(h.f), level: 'endpoint', group: [h.f], owner: h.f };
+      return { id: `${h.f}${SEP}${h.fe}`, label: h.fe, kind: this.kindOf(h.f), level: 'endpoint', group: [h.f], owner: h.f, tech: h.ft };
     }
-    return { id: h.f, label: h.f, kind: this.kindOf(h.f), level: 'service', group: [], owner: h.f };
+    return { id: h.f, label: h.f, kind: this.kindOf(h.f), level: 'service', group: [], owner: h.f, tech: h.ft };
   }
 
   private dstSpec(h: Hop): NodeSpec {
     const kind: NodeKind = h.k === 'db' ? 'database' : h.k === 'ext' ? 'external' : this.kindOf(h.to);
     if (this.mode.endpoints && h.te) {
       const g = h.tg?.length ? h.tg : [h.to];
-      return { id: [...g, h.te].join(SEP), label: h.te, kind, level: 'endpoint', group: g, owner: g[0] };
+      return { id: [...g, h.te].join(SEP), label: h.te, kind, level: 'endpoint', group: g, owner: g[0], tech: h.tt };
     }
     // service view: a database server with databases is a bubble with one node per database
     // (postgres: users_db, orders_db, ...); Tempo's own node for the server is replaced by it
@@ -507,9 +526,9 @@ export class Scene {
         const old = this.nodes.get(server);
         if (old && !old.group.length) old.dying = true;
       }
-      return { id: `${server}${SEP}${db}`, label: db, kind, level: 'service', group: [server], owner: server };
+      return { id: `${server}${SEP}${db}`, label: db, kind, level: 'service', group: [server], owner: server, tech: h.tt };
     }
-    return { id: h.to, label: h.to, kind, level: 'service', group: [], owner: h.to };
+    return { id: h.to, label: h.to, kind, level: 'service', group: [], owner: h.to, tech: h.tt };
   }
 
   private node(spec: NodeSpec, near?: SceneNode): SceneNode {
@@ -520,6 +539,10 @@ export class Scene {
         this.recolor(n);
       }
       if (spec.user) n.user = spec.user;
+      if (spec.tech && !n.tech) {
+        n.tech = spec.tech;
+        this.topologyDirty = true;
+      }
       if (spec.group.length > n.group.length) {
         // learned which server a database belongs to
         n.group = spec.group;
@@ -557,7 +580,10 @@ export class Scene {
     }
     const r0 = spec.level === 'user' ? 9 : spec.level === 'endpoint' ? 16 : 26;
     // newcomers just appear: in a free spot near where they belong, without moving anybody
-    if (!outside(spec)) [x, y] = this.freeSpot(x, y, r0, 30);
+    if (!outside(spec)) {
+      [x, y] = this.freeCell(x, y);
+      this.homes.set(spec.id, [x, y]);
+    }
     n = {
       ...spec,
       x,
@@ -574,21 +600,88 @@ export class Scene {
     return n;
   }
 
-  private freeSpot(x: number, y: number, r: number, gap: number): Vec2 {
-    for (let i = 0; i < 40; i++) {
-      // golden-angle spiral around the wanted spot
-      const d = i === 0 ? 0 : 18 * Math.sqrt(i) * (1 + r / 30), a = i * 2.39996;
-      const cx = x + Math.cos(a) * d, cy = y + Math.sin(a) * d;
-      let ok = true;
-      for (const o of this.nodes.values()) {
-        if (Math.hypot(o.x - cx, o.y - cy) < r + o.r + gap) {
-          ok = false;
-          break;
+  // ---- honeycomb ----------------------------------------------------------
+  // Nodes stand on a pointy-top hexagonal lattice: cell (q, r) is at x = S·(q + r/2), y = S·√3/2·r.
+
+  /** distance between neighbouring cells */
+  get cellSize(): number {
+    return this.mode.endpoints ? HEX_ENDPOINTS : HEX_SERVICES;
+  }
+
+  private toCell(x: number, y: number): [number, number] {
+    const S = this.cellSize;
+    const rf = y / (S * HEX_ROW), qf = x / S - rf / 2;
+    // cube rounding
+    let q = Math.round(qf), r = Math.round(rf);
+    const s = Math.round(-qf - rf);
+    const dq = Math.abs(q - qf), dr = Math.abs(r - rf), ds = Math.abs(s - (-qf - rf));
+    if (dq > dr && dq > ds) q = -r - s;
+    else if (dr > ds) r = -q - s;
+    return [q, r];
+  }
+
+  private cellPos(q: number, r: number): Vec2 {
+    const S = this.cellSize;
+    return [S * (q + r / 2), S * HEX_ROW * r];
+  }
+
+  /** cells taken by nodes (their planned home, else where they are), except `skip` */
+  private takenCells(skip?: Set<string>): Set<string> {
+    const taken = new Set<string>();
+    for (const n of this.nodes.values()) {
+      if (outside(n) || skip?.has(n.id)) continue;
+      const p = this.homes.get(n.id) ?? [n.x, n.y];
+      taken.add(this.toCell(p[0], p[1]).join(','));
+    }
+    return taken;
+  }
+
+  /** the free cell nearest to (x, y), searching ring by ring around it */
+  private nearestFree(x: number, y: number, taken: Set<string>): Vec2 {
+    const [q0, r0] = this.toCell(x, y);
+    if (!taken.has(`${q0},${r0}`)) return this.cellPos(q0, r0);
+    const DIRS = [[1, 0], [1, -1], [0, -1], [-1, 0], [-1, 1], [0, 1]];
+    for (let ring = 1; ring < 40; ring++) {
+      let best: Vec2 | null = null, bd = Infinity;
+      // walk the ring: start ring steps out in direction 4, then ring steps along each side
+      let q = q0 + DIRS[4][0] * ring, r = r0 + DIRS[4][1] * ring;
+      for (let side = 0; side < 6; side++) {
+        for (let k = 0; k < ring; k++) {
+          if (!taken.has(`${q},${r}`)) {
+            const p = this.cellPos(q, r);
+            const d = (p[0] - x) ** 2 + (p[1] - y) ** 2;
+            if (d < bd) {
+              bd = d;
+              best = p;
+            }
+          }
+          q += DIRS[side][0];
+          r += DIRS[side][1];
         }
       }
-      if (ok) return [cx, cy];
+      if (best) return best;
     }
-    return [x, y];
+    return this.cellPos(q0, r0);
+  }
+
+  private freeCell(x: number, y: number): Vec2 {
+    return this.nearestFree(x, y, this.takenCells());
+  }
+
+  /** Snap planned positions onto free cells; busy nodes first, so they keep their spot. */
+  private snapAll(targets: Map<string, Vec2>): Map<string, Vec2> {
+    const order = [...targets.keys()].map((id) => this.nodes.get(id)).filter((n): n is SceneNode => !!n)
+      .sort((a, b) => (b.rate + b.outRate) - (a.rate + a.outRate) || (a.id < b.id ? -1 : 1));
+    const taken = new Set<string>();
+    const out = new Map<string, Vec2>();
+    for (const n of order) {
+      const t = targets.get(n.id);
+      if (!t) continue;
+      const p = this.nearestFree(t[0], t[1], taken);
+      taken.add(this.toCell(p[0], p[1]).join(','));
+      out.set(n.id, p);
+    }
+    return out;
   }
 
   private colorOf(spec: NodeSpec): Rgb {
@@ -786,10 +879,24 @@ export class Scene {
     }
     this.groupMembers = groups;
 
-    // users are not simulated: they stand in a column on the left (see layoutUsers)
-    const simNodes = nodes.filter((n) => !outside(n));
-    const forceGroups = new Map([...groups].filter(([k]) => k !== 'users'));
-    const hasUsers = simNodes.length < nodes.length;
+    // users are not simulated: they stand in a column on the left (see layoutUsers).
+    // The simulation moves copies; the shown nodes glide to the result afterwards (see arrange).
+    const real = nodes.filter((n) => !outside(n));
+    const hasUsers = real.length < nodes.length;
+    // while a plan is running, nodes keep their simulated progress; newcomers start where they stand
+    const prev = this.clones;
+    const clones = new Map(real.map((n): [string, SceneNode] => {
+      const p = this.planning ? prev.get(n.id) : undefined;
+      return [n.id, { ...n, x: p?.x ?? n.x, y: p?.y ?? n.y, vx: 0, vy: 0 }];
+    }));
+    this.clones = clones;
+    const simNodes = [...clones.values()];
+    const forceGroups = new Map<string, SceneNode[]>();
+    for (const [k, m] of groups) {
+      if (k === 'users') continue;
+      const list = m.map((n) => clones.get(n.id)).filter((n): n is SceneNode => !!n);
+      if (list.length) forceGroups.set(k, list);
+    }
 
     const rank = this.ranks();
     const rankOf = (n: SceneNode) => rank.get(n.owner) ?? 1;
@@ -799,8 +906,8 @@ export class Scene {
     const RING = ep ? 480 : 250;
     const links: Link[] = [];
     for (const e of this.edges.values()) {
-      const s = this.nodes.get(e.s), t = this.nodes.get(e.t);
-      if (s && t && s !== t && !outside(s) && !outside(t)) links.push({ source: s, target: t, same: s.owner === t.owner });
+      const s = clones.get(e.s), t = clones.get(e.t);
+      if (s && t && s !== t) links.push({ source: s, target: t, same: s.owner === t.owner });
     }
     const sim = this.sim;
     sim.nodes(simNodes);
@@ -901,6 +1008,38 @@ export class Scene {
         n.vy = (n.vy ?? 0) + (cy - n.y) * k;
       }
     });
+    // alike nodes stand together: within each group (and among the top-level nodes), nodes of the
+    // same type (java · spring-webmvc, kafka, postgresql, ...) pull towards their common centre
+    const byParent = new Map<string, Map<string, SceneNode[]>>();
+    for (const n of simNodes) {
+      if (!n.tech) continue;
+      const parent = n.group.join(SEP);
+      let techs = byParent.get(parent);
+      if (!techs) byParent.set(parent, (techs = new Map()));
+      let list = techs.get(n.tech);
+      if (!list) techs.set(n.tech, (list = []));
+      list.push(n);
+    }
+    const techSets: { members: SceneNode[]; k: number }[] = [];
+    for (const [parent, techs] of byParent) {
+      if (techs.size < 2) continue;   // all alike: nothing to sort
+      for (const members of techs.values()) if (members.length > 1) techSets.push({ members, k: parent ? 0.14 : 0.05 });
+    }
+    sim.force('tech', (alpha: number) => {
+      for (const { members, k } of techSets) {
+        let cx = 0, cy = 0;
+        for (const m of members) {
+          cx += m.x;
+          cy += m.y;
+        }
+        cx /= members.length;
+        cy /= members.length;
+        for (const m of members) {
+          m.vx = (m.vx ?? 0) + (cx - m.x) * k * alpha;
+          m.vy = (m.vy ?? 0) + (cy - m.y) * k * alpha;
+        }
+      }
+    });
     sim.force('group', (alpha: number) => {
       for (const [key, members] of forceGroups) {
         if (members.length < 2) continue;
@@ -922,6 +1061,31 @@ export class Scene {
     });
   }
 
+  /** Start simulating from where the nodes are shown now. */
+  private startPlan(): void {
+    for (const c of this.clones.values()) {
+      const n = this.nodes.get(c.id);
+      if (!n) continue;
+      c.x = n.x;
+      c.y = n.y;
+      c.r = n.r;
+      c.vx = c.vy = 0;
+    }
+    this.sim.alpha(0.7);
+    this.planning = true;
+  }
+
+  /** Run the simulation for up to `budget` ms; true once it has settled. */
+  private stepPlan(budget: number): boolean {
+    const sim = this.sim;
+    const t0 = performance.now();
+    while (sim.alpha() > sim.alphaMin()) {
+      sim.tick();
+      if (performance.now() - t0 > budget) return false;
+    }
+    return true;
+  }
+
   /**
    * Tranquility: the topology stays put for CALM ms, then re-arranges for ARRANGE ms, and so on.
    * Newcomers appear in a free spot in between. Shorter calm while the graph first fills in;
@@ -929,7 +1093,7 @@ export class Scene {
    */
   /** true while the layout is moving (the camera holds still meanwhile) */
   get arranging(): boolean {
-    return this.arrangeUntil > 0;
+    return this.arrangeUntil > 0 || this.planning;
   }
 
   /** counters for the debug view */
@@ -947,45 +1111,53 @@ export class Scene {
       'shockwaves': this.rings.length,
       'playback delay': this.delay === null ? '–' : `${(this.delay / 1000).toFixed(1)} s`,
       'real calls per ball': this.factor.toFixed(1),
+      'traces dropped (ball limit)': this.droppedTraces,
+      'honeycomb cell': `${this.cellSize} world units`,
       renames: this.renames.size,
       layout: this.arranging ? 'arranging' : 'calm',
     };
   }
 
-  private arrange(dt: number): void {
+  private arrange(_dt: number): void {
     const CALM = 20000, ARRANGE = 4000;
     const now = performance.now();
     if (!this.nodes.size) return;
     if (!this.firstData) this.firstData = now;
     const warmup = now - this.firstData < 12000;
-    if (this.arrangeSoon || now >= this.nextArrange) {
+    if (!this.planning && !this.glideStart && (this.arrangeSoon || now >= this.nextArrange)) {
       this.arrangeSoon = false;
+      this.startPlan();
+    }
+    if (this.planning) {
+      // a few ms per frame until the simulation has settled, then snap and glide
+      if (!this.stepPlan(4)) return;
+      this.planning = false;
+      const targets = new Map<string, Vec2>();
+      for (const c of this.clones.values()) if (this.nodes.has(c.id)) targets.set(c.id, [c.x, c.y]);
+      this.homes = this.snapAll(targets);
+      this.layoutUsers();
+      this.glideFrom.clear();
+      for (const n of this.nodes.values()) this.glideFrom.set(n.id, [n.x, n.y]);
+      this.glideStart = now;
       this.arrangeUntil = now + ARRANGE;
       this.nextArrange = now + ARRANGE + (warmup ? 3000 : CALM);
-      this.sim.alpha(0.7);
-      this.tickAcc = 0;
-      this.layoutUsers();
     }
-    if (now < this.arrangeUntil) {
-      // ~360 ticks spread over the window: slow, calm motion
-      this.tickAcc += dt * (360000 / ARRANGE);
-      for (; this.tickAcc >= 1 && this.sim.alpha() > this.sim.alphaMin(); this.tickAcc--) this.sim.tick();
-      // users glide to their places in the column
-      const k = Math.min(1, dt * 1.6);
-      for (const n of this.nodes.values()) {
-        const slot = this.userSlots.get(n.id);
-        if (!slot || !outside(n)) continue;
-        n.x += (slot[0] - n.x) * k;
-        n.y += (slot[1] - n.y) * k;
-      }
-    } else if (this.arrangeUntil) {
-      // window over: stop dead, nothing drifts during the calm
-      for (const n of this.nodes.values()) {
-        n.vx = n.vy = 0;
-        const slot = this.userSlots.get(n.id);
-        if (slot && outside(n)) [n.x, n.y] = slot;
-      }
+    if (!this.glideStart) return;
+    const p = Math.min(1, (now - this.glideStart) / ARRANGE);
+    const e = p * p * (3 - 2 * p);
+    for (const n of this.nodes.values()) {
+      const from = this.glideFrom.get(n.id);
+      const to = outside(n) ? this.userSlots.get(n.id) : this.homes.get(n.id);
+      if (!from || !to) continue;
+      n.x = from[0] + (to[0] - from[0]) * e;
+      n.y = from[1] + (to[1] - from[1]) * e;
+      n.vx = n.vy = 0;
+    }
+    if (p >= 1) {
+      // window over: everybody on their cell, nothing drifts during the calm
+      this.glideStart = 0;
       this.arrangeUntil = 0;
+      this.glideFrom.clear();
     }
   }
 
@@ -1001,9 +1173,10 @@ export class Scene {
     if (!users.length && !(cloud && outside(cloud))) return;
     let minX = 0, y0 = 0, y1 = 0;
     if (others.length) {
-      minX = Math.min(...others.map((n) => n.x - n.r - (n.group.length ? 40 + n.group.length * 28 : 0)));
-      y0 = Math.min(...others.map((n) => n.y));
-      y1 = Math.max(...others.map((n) => n.y));
+      const at = (n: SceneNode) => this.homes.get(n.id) ?? [n.x, n.y];
+      minX = Math.min(...others.map((n) => at(n)[0] - n.r - (n.group.length ? 40 + n.group.length * 28 : 0)));
+      y0 = Math.min(...others.map((n) => at(n)[1]));
+      y1 = Math.max(...others.map((n) => at(n)[1]));
     }
     const x0 = minX - (this.mode.endpoints ? 440 : 380);
     const cy = (y0 + y1) / 2;
@@ -1105,7 +1278,13 @@ export class Scene {
       list.push(h);
     }
     const cutoff = this.play - 1500;
-    for (const list of byTrace.values()) this.scheduleTrace(list, cutoff, !backlog);
+    for (const list of byTrace.values()) {
+      if (this.queue.length + this.balls.length > MAX_BALLS) {
+        this.droppedTraces++;
+        continue;
+      }
+      this.scheduleTrace(list, cutoff, !backlog);
+    }
     this.queue.sort((a, b) => a.depart - b.depart);
   }
 

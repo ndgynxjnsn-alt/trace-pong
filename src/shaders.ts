@@ -5,7 +5,7 @@ export const common = /* wgsl */`
 struct Globals {
   view: vec4f,    // camX, camY, zoom (css px per world unit), dpr
   screen: vec4f,  // width css, height css, time s, dt s
-  misc: vec4f,    // focus dim, -, -, -
+  misc: vec4f,    // focus dim, honeycomb cell size (world units), -, -
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 
@@ -87,11 +87,20 @@ struct FsOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
     col += c.rgb * a.w * exp(-dot(d, d) / (2.0 * r * r));
   }
 
-  // dot grid, fixed to world space, fades when zoomed out
-  let cell = 48.0;
-  let g = (fract(world / cell + 0.5) - 0.5) * cell * G.view.z;
-  let dotv = 1.0 - smoothstep(0.6, 1.4, length(g));
-  col += vec3f(0.035, 0.045, 0.075) * dotv * smoothstep(0.25, 0.7, G.view.z);
+  // honeycomb, fixed to world space: the cells the nodes snap to; fades when zoomed out.
+  // Two offset rectangular grids; the nearer centre is the cell's.
+  let S = max(G.misc.y, 8.0);
+  let rr = vec2f(S, S * 1.7320508);
+  let h = rr * 0.5;
+  let ga = world - floor(world / rr) * rr - h;
+  let wb = world - h;
+  let gb = wb - floor(wb / rr) * rr - h;
+  let gv = select(gb, ga, dot(ga, ga) < dot(gb, gb));
+  let hp = abs(gv);
+  let hd = max(hp.x, hp.x * 0.5 + hp.y * 0.8660254);   // 0 at the centre, S/2 on the cell edge
+  let edgePx = (S * 0.5 - hd) * G.view.z;
+  let line = 1.0 - smoothstep(0.0, 1.1, edgePx);
+  col += vec3f(0.022, 0.030, 0.055) * line * smoothstep(0.12, 0.4, G.view.z);
 
   return vec4f(col, 1.0);
 }
@@ -224,11 +233,14 @@ fn angDiff(a: f32, b: f32) -> f32 {
   let hover = in.d.y;
   let t = G.screen.z;
 
-  // databases are octagons (distance to a regular octagon with inradius r), the rest circles
+  // databases are octagons, services and external APIs pointy-top hexagons (they tile like the
+  // honeycomb behind them), users circles: distance to the shape with inradius r
   var d = length(in.local);
+  let p = abs(in.local);
   if (kind == 1) {
-    let p = abs(in.local);
     d = max(max(p.x, p.y), (p.x + p.y) * 0.70710678);
+  } else if (kind == 0 || kind == 2) {
+    d = max(p.x, p.x * 0.5 + p.y * 0.8660254);
   }
   let aa = max(fwidth(d), 1e-3);
 

@@ -19,7 +19,7 @@ export interface TracePongHandle {
 }
 
 /** options that need a fresh scene and data source when they change */
-const SOURCE_KEYS: (keyof ViewOptions)[] = ['mode', 'tempoUrl', 'promUrl', 'traceql', 'labelFilter', 'window', 'maxTraces', 'sampling', 'rename'];
+const SOURCE_KEYS: (keyof ViewOptions)[] = ['mode', 'tempoUrl', 'promUrl', 'traceql', 'labelFilter', 'window', 'maxTraces', 'sampling', 'interpolate', 'rename'];
 
 function injectCss(): void {
   if (document.getElementById('tracepong-css')) return;
@@ -47,11 +47,17 @@ export async function createTracePong(container: HTMLElement, env: Env, options:
   // Without WebGPU (or when it fails to start) trace-pong still runs, drawn with a plain 2D canvas.
   let renderer: Renderer | null = null;
   let failure: string | null = null;
-  try {
-    renderer = await Renderer.create(el<HTMLCanvasElement>(root, 'gpu'));
-  } catch (e) {
-    failure = e instanceof Error ? e.message : String(e);
+  if (crashedLastTime()) {
+    failure = 'WebGPU is off because the last session ended unexpectedly while it was drawing (a GPU or browser crash?). '
+      + 'Retry WebGPU to turn it back on.';
     console.warn('trace-pong:', failure);
+  } else {
+    try {
+      renderer = await Renderer.create(el<HTMLCanvasElement>(root, 'gpu'));
+    } catch (e) {
+      failure = e instanceof Error ? e.message : String(e);
+      console.warn('trace-pong:', failure);
+    }
   }
   const tp = new TracePong(root, renderer, env, options, failure);
   return {
@@ -99,6 +105,7 @@ class TracePong {
   private lowSeconds = 0;
   private readonly debugEl: HTMLElement;
   private debugAt = 0;
+  private readonly instanceId = Math.random().toString(36).slice(2);
 
   constructor(private readonly root: HTMLElement, private renderer: Renderer | null, private readonly env: Env, options: ViewOptions,
     failure: string | null) {
@@ -145,6 +152,18 @@ class TracePong {
       this.raf = requestAnimationFrame(frame);
     };
     this.raf = requestAnimationFrame(frame);
+
+    const beat = () => heartbeat(this.instanceId, !!this.gpu && !document.hidden && !this.destroyed);
+    const timer = setInterval(beat, 1000);
+    const leave = () => heartbeat(this.instanceId, false);
+    window.addEventListener('pagehide', leave);
+    document.addEventListener('visibilitychange', beat);
+    this.cleanup.push(() => {
+      clearInterval(timer);
+      window.removeEventListener('pagehide', leave);
+      document.removeEventListener('visibilitychange', beat);
+      leave();
+    });
   }
 
   /**
@@ -276,16 +295,19 @@ class TracePong {
     scene.build();
     t0 = ema('build', t0);
     const gpu = this.gpu;
+    let drawn = !gpu;
     if (gpu) {
       try {
-        this.renderGpu(gpu, dt);
+        drawn = this.renderGpu(gpu, dt);
       } catch (e) {
         // never let a GPU problem take the panel down
         this.fallback(e instanceof Error ? e.message : String(e));
+        drawn = true;
       }
     }
     t0 = ema('encode', t0);
-    scene.sparks.reset();
+    // sparks wait for the next frame the GPU takes, but never pile up
+    if (drawn || scene.sparks.count > 20000) scene.sparks.reset();
     this.overlay.draw(scene, this.cam, !gpu);
     ema('overlay', t0);
   }
@@ -345,11 +367,11 @@ class TracePong {
     body.innerHTML = debugHtml(this.debugReport());
   }
 
-  private renderGpu(gpu: Renderer, dt: number): void {
+  private renderGpu(gpu: Renderer, dt: number): boolean {
     const scene = this.scene;
     const s = scene.out;
-    gpu.render({
-      cam: this.cam, dpr: this.dpr * this.renderScale, time: scene.time, dt: scene.paused ? 0 : dt, dim: 0,
+    return gpu.render({
+      cam: this.cam, dpr: this.dpr * this.renderScale, time: scene.time, dt: scene.paused ? 0 : dt, dim: 0, cell: scene.cellSize,
       nodes: s.nodes.data, nodeCount: s.nodes.count,
       edges: s.edges.data, edgeCount: s.edges.count,
       under: s.under.data, underCount: s.under.count,
@@ -617,6 +639,54 @@ class TracePong {
       e.stopPropagation();
     });
   }
+}
+
+// ---- crash guard ------------------------------------------------------------------------------
+// While WebGPU draws in a visible tab, each panel writes a heartbeat every second; it is removed
+// when the panel goes away, the tab is hidden or the page is left. A heartbeat that stopped
+// without that means the tab (or the GPU process) died while drawing: start the next time with
+// the 2D view and let the user retry.
+const ALIVE_KEY = 'tracepong.gpu.alive';
+
+function readAlive(): Record<string, number> {
+  try {
+    const v = JSON.parse(localStorage.getItem(ALIVE_KEY) ?? '{}') as unknown;
+    return v && typeof v === 'object' ? (v as Record<string, number>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeAlive(v: Record<string, number>): void {
+  try {
+    if (Object.keys(v).length) localStorage.setItem(ALIVE_KEY, JSON.stringify(v));
+    else localStorage.removeItem(ALIVE_KEY);
+  } catch {
+    // storage blocked: no guard
+  }
+}
+
+/** a heartbeat that stopped 5 s to 10 min ago without being removed; clears it either way */
+function crashedLastTime(): boolean {
+  const v = readAlive();
+  const now = Date.now();
+  let crashed = false;
+  for (const [id, t] of Object.entries(v)) {
+    const age = now - t;
+    if (age > 5000) {
+      if (age < 600000) crashed = true;
+      delete v[id];
+    }
+  }
+  writeAlive(v);
+  return crashed;
+}
+
+function heartbeat(id: string, on: boolean): void {
+  const v = readAlive();
+  if (on) v[id] = Date.now();
+  else delete v[id];
+  writeAlive(v);
 }
 
 function segDist(px: number, py: number, x0: number, y0: number, x1: number, y1: number): number {

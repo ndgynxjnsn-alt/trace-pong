@@ -73,10 +73,11 @@ export class Hud {
           ${n.user.email ? `<span>${esc(n.user.email)}</span>` : ''}<code>${esc(n.user.id)}</code></div>`
       : '';
     const group = n.group.length && n.level !== 'user' ? `<div class="path">${n.group.map(esc).join(' › ')}</div>` : '';
+    const tech = n.tech ? `<div class="path">${esc(n.tech)}</div>` : '';
     const estimated = !n.fromGraph ? '<p class="hint">rates estimated from sampled traces</p>' : '';
     tip.innerHTML = `
       <h3><span class="dot" style="background:${n.css}"></span>${esc(n.level === 'user' ? s.labelOf(n) : n.label)} <small>${n.level === 'endpoint' ? 'endpoint' : n.kind}</small></h3>
-      ${group}${user}
+      ${group}${tech}${user}
       <div class="kv"><div><b>${fmtRate(n.level === 'user' || n.id === 'user' ? n.outRate : n.rate || n.outRate)}</b><span>req/s</span></div>
         <div><b class="${er > 1 ? 'bad' : ''}">${er.toFixed(1)}%</b><span>errors</span></div>
         <div><b>${fmtMs(n.mean)}</b><span>mean</span></div>

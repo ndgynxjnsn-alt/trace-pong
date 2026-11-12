@@ -34,7 +34,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from topology import (FRONTEND_VIEWS, INCIDENT_LENGTH, INCIDENT_PERIOD, INCIDENTS,
-                      TOPOLOGY, TRAFFIC_MIX)
+                      SCOPES, STACKS, TOPOLOGY, TRAFFIC_MIX)
 from users import ActiveUsers, claims, make_users, token
 
 SERVICE = os.environ.get("SERVICE", "gateway")
@@ -46,7 +46,7 @@ def log(*args):
     print(f"[{SERVICE}]", *args, file=sys.stderr, flush=True)
 
 
-def setup_tracing(name=SERVICE, extra=None):
+def setup_tracing(name=SERVICE, extra=None, scope="trace-pong-mesh"):
     resource = Resource.create({
         "service.name": name,
         "service.namespace": NAMESPACE,
@@ -58,7 +58,7 @@ def setup_tracing(name=SERVICE, extra=None):
     provider.add_span_processor(BatchSpanProcessor(
         OTLPSpanExporter(), schedule_delay_millis=1000, max_export_batch_size=1024))
     trace.set_tracer_provider(provider)
-    return trace.get_tracer("trace-pong-mesh")
+    return trace.get_tracer(scope)
 
 
 # --------------------------------------------------------------------------
@@ -110,15 +110,21 @@ def fill(path):
 class Mesh:
     def __init__(self, tracer):
         self.tracer = tracer
+        # one tracer per instrumentation scope of this service's stack (see topology.STACKS)
+        scopes = SCOPES.get(STACKS.get(SERVICE, ""), {})
+        self.scoped = {role: trace.get_tracer(name) for role, name in scopes.items()}
         self.routes = compile_routes(TOPOLOGY.get(SERVICE, {}))
         self.pool = ThreadPoolExecutor(max_workers=64)
         self.bearer = None   # only the frontend sends tokens
+
+    def tr(self, role):
+        return self.scoped.get(role, self.tracer)
 
     # ---- outgoing ---------------------------------------------------------
     def http_call(self, service, method, path, kind=SpanKind.CLIENT, attrs=None):
         url = f"http://{service}:{PORT}{fill(path)}"
         name = f"{method} {path}"
-        with self.tracer.start_as_current_span(name, kind=kind) as span:
+        with self.tr("client").start_as_current_span(name, kind=kind) as span:
             span.set_attribute("http.request.method", method)
             span.set_attribute("url.full", url)
             span.set_attribute("server.address", service)
@@ -148,7 +154,7 @@ class Mesh:
         """Uninstrumented database: Tempo names the virtual node after db.name (or db.system).
         server.address / db.namespace / db.collection.name give the server > database > table path."""
         name = f"{operation} {database}.{table}" if database else f"{operation} {table}"
-        with self.tracer.start_as_current_span(name, kind=SpanKind.CLIENT) as span:
+        with self.tr("db").start_as_current_span(name, kind=SpanKind.CLIENT) as span:
             span.set_attribute("db.system", system)
             span.set_attribute("server.address", server)
             if database:
@@ -169,7 +175,7 @@ class Mesh:
             return 200
 
     def ext_call(self, peer, method, path, ms):
-        with self.tracer.start_as_current_span(f"{method} {path}", kind=SpanKind.CLIENT) as span:
+        with self.tr("client").start_as_current_span(f"{method} {path}", kind=SpanKind.CLIENT) as span:
             span.set_attribute("peer.service", peer)
             span.set_attribute("http.request.method", method)
             span.set_attribute("url.full", f"https://{peer}{path}")
@@ -182,7 +188,7 @@ class Mesh:
             return code
 
     def publish(self, topic, service, path):
-        with self.tracer.start_as_current_span(f"{topic} publish", kind=SpanKind.PRODUCER) as span:
+        with self.tr("kafka").start_as_current_span(f"{topic} publish", kind=SpanKind.PRODUCER) as span:
             span.set_attribute("messaging.system", "kafka")
             span.set_attribute("messaging.destination.name", topic)
             span.set_attribute("messaging.operation.type", "publish")
@@ -241,7 +247,7 @@ class Mesh:
         consumer = path.startswith("/consume/")
         name = f"{headers.get('x-topic', 'queue')} process" if consumer else f"{method} {pattern}"
         kind = SpanKind.CONSUMER if consumer else SpanKind.SERVER
-        with self.tracer.start_as_current_span(name, context=ctx, kind=kind) as span:
+        with self.tr("kafka" if consumer else "server").start_as_current_span(name, context=ctx, kind=kind) as span:
             if consumer:
                 span.set_attribute("messaging.system", "kafka")
                 span.set_attribute("messaging.destination.name", headers.get("x-topic", "queue"))
@@ -320,7 +326,8 @@ def loadgen():
     target = os.environ.get("TARGET", "gateway")
     base = float(os.environ.get("RPS", "12"))
     app = os.environ.get("FRONTEND_NAME", "shop-web")
-    tracer = setup_tracing(app, {"telemetry.sdk.language": "webjs", "service.version": "2.4.1"})
+    tracer = setup_tracing(app, {"telemetry.sdk.language": "webjs", "service.version": "2.4.1"},
+                           scope="@grafana/faro-web-tracing")
     routes, weights = zip(*TRAFFIC_MIX.items())
     users = ActiveUsers(make_users(), size=int(os.environ.get("ACTIVE_USERS", "18")))
     sessions = {}
@@ -406,4 +413,5 @@ if __name__ == "__main__":
         time.sleep(5)
         loadgen()
     else:
-        serve(Mesh(setup_tracing()))
+        lang = STACKS.get(SERVICE)
+        serve(Mesh(setup_tracing(extra={"telemetry.sdk.language": lang} if lang else None)))

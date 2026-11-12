@@ -97,13 +97,17 @@ export function debugReport(d: DebugInput): { sections: [string, Row[]][]; hints
   const t = d.times;
   const cpu = t.update + t.build + t.encode + t.overlay;
   const gpuMs = d.gpu?.gpuMs ?? null;
-  const backing: [number, number] = [Math.round(d.css[0] * d.dpr * d.renderScale), Math.round(d.css[1] * d.dpr * d.renderScale)];
+  const clamp = d.gpu?.clampScale ?? 1;
+  const k = d.dpr * d.renderScale * clamp;
+  const backing: [number, number] = [Math.round(d.css[0] * k), Math.round(d.css[1] * k)];
   sections.push(['Frame', [
     ['fps', `${d.fps.toFixed(0)} (${ms(t.interval)} per frame)`, d.fps >= 50 ? 'ok' : d.fps >= 30 ? 'warn' : 'bad'],
     ['cpu', `${ms(cpu)}  (scene ${ms(t.update)}, pack ${ms(t.build)}, gpu submit ${ms(t.encode)}, labels ${ms(t.overlay)})`, cpu > 12 ? 'warn' : ''],
     ['gpu', gpuMs === null ? (d.gpu ? 'measuring…' : '–') : `${ms(gpuMs)} submit → done`, gpuMs !== null && gpuMs > 14 ? 'warn' : ''],
     ['canvas', `${d.css[0]}×${d.css[1]} css px, dpr ${d.dpr}`],
-    ['render', `${backing[0]}×${backing[1]} px, scale ${d.renderScale.toFixed(2)} ${d.scaleNote}`, d.renderScale < 1 ? 'warn' : ''],
+    ['render', `${backing[0]}×${backing[1]} px, scale ${d.renderScale.toFixed(2)} ${d.scaleNote}`
+      + (clamp < 1 ? `, limited to ${Math.round(clamp * 100)}% (GPU memory guard)` : ''), d.renderScale < 1 || clamp < 1 ? 'warn' : ''],
+    ['frames skipped', d.gpu ? `${d.gpu.skipped} (GPU still busy with earlier frames)` : '–', d.gpu && d.gpu.skipped > 0 ? 'warn' : ''],
     ['bloom', d.bloom ? 'on' : 'off'],
   ]]);
 

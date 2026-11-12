@@ -39,7 +39,8 @@ export function resolve(o: PanelOptions): ViewOptions {
     labelFilter: o.labelFilter || '',
     window: o.window || '1m',
     maxTraces: o.maxTraces || 30,
-    sampling: o.sampling || 100,
+    sampling: o.sampling || 10,
+    interpolate: o.interpolate !== false,
     rename: o.rename || '',
     showClock: o.showClock !== false,
     labels: o.labels !== false,
@@ -170,10 +171,15 @@ export const plugin = new PanelPlugin<PanelOptions>(TracePongPanel)
         settings: { min: 1, max: 200, integer: true },
       })
       .addSelect({
-        path: 'sampling', name: 'Trace sampling', category: ['Data'], showIf: isLive, defaultValue: 100,
-        description: 'Fetch only this share of the traces, chosen by trace id (every viewer sees the same ones). '
-          + 'Rates still come from the service graph, so only the number of balls goes down.',
+        path: 'sampling', name: 'Trace sampling', category: ['Data'], showIf: isLive, defaultValue: 10,
+        description: 'Fetch only this share of the traces from Tempo, chosen by trace id (every viewer sees the same ones). '
+          + 'Rates still come from the service graph.',
         settings: { options: SAMPLING.map((v) => ({ value: v, label: v === 100 ? 'all traces' : `${v}%` })) },
+      })
+      .addBooleanSwitch({
+        path: 'interpolate', name: 'Interpolate sampled traces', category: ['Data'], showIf: isLive, defaultValue: true,
+        description: 'Replay each fetched trace as often as it stands for (10× at 10%, 5× at 20%) at random times, '
+          + 'so the traffic looks complete while Tempo serves only the sample. Off: show just the sample.',
       })
       .addTextInput({
         path: 'rename', name: 'Rename nodes', category: ['Data'], defaultValue: '',
