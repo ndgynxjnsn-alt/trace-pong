@@ -24,8 +24,6 @@ export interface Frame {
   time: number;
   dt: number;
   dim: number;
-  /** honeycomb cell size in world units (background grid) */
-  cell: number;
   nodes: Float32Array<ArrayBuffer>;
   nodeCount: number;
   edges: Float32Array<ArrayBuffer>;
@@ -391,7 +389,7 @@ export class Renderer {
     d.queue.writeBuffer(this.globals, 0, new Float32Array([
       f.cam.x, f.cam.y, f.cam.zoom, dpr,
       w / dpr, h / dpr, f.time, f.dt,
-      f.dim, f.cell, 0, 0,
+      f.dim, 0, 0, 0,
       0, 0, 0, 0,
     ]));
     const heat = new Float32Array(4 + MAX_HEAT * 8);

@@ -100,7 +100,7 @@ const outside = (n: { kind: NodeKind }) => n.kind === 'user' || n.kind === 'clou
 /** separator inside node ids and group keys (never shown) */
 const SEP = '\u001f';
 const USERS_PER_COLUMN = 28;
-const CLOUD_LABEL = 'Mystery Cloud';
+const CLOUD_LABEL = 'Mystery';
 /** following a user shows what their traces touched in this much playback time (plus what is queued) */
 const USER_PATH_MS = 30000;
 /** honeycomb: distance between neighbouring cells, and the row height factor (√3/2) */

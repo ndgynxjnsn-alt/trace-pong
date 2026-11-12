@@ -2,7 +2,7 @@
 
 export type Rgb = [number, number, number];
 
-/** cloud: the Mystery Cloud, callers we cannot see (no traceparent, no user), i.e. uninstrumented clients */
+/** cloud: "Mystery", callers we cannot see (no traceparent, no user), i.e. uninstrumented clients */
 export type NodeKind = 'service' | 'database' | 'external' | 'user' | 'cloud';
 export type HopKind = 'http' | 'messaging' | 'db' | 'ext';
 export type Severity = 'err' | 'warn' | 'redirect' | 'ok';

@@ -38,11 +38,11 @@ traffic, as promviz/Vizceral do. Unlike those, every ball is a **real call from 
 * **Sound** (off by default, speaker button or <kbd>M</kbd>): synthesized space explosions, large for errors,
   medium for 4xx, distant pops for the rest. All voices share a long reverb and a compressor so they stack
   into a rumble, and a per-severity budget keeps busy graphs listenable.
-* **Mystery Cloud**: uninstrumented callers (traces whose root is a server span without `traceparent` and
+* **Mystery**: uninstrumented callers (traces whose root is a server span without `traceparent` and
   without a user: crawlers, monitors, webhooks) come out of a soft cloud in the top left, about ten nodes across;
   each trace leaves from one of its many origin points and merges onto the edge.
 * **Honeycomb**: services and external APIs are hexagons, databases octagons, users rings. Nodes stand on a
-  hexagonal grid (faintly drawn in the background): each re-arrangement runs the force layout to its end
+  hexagonal grid (not drawn): each re-arrangement runs the force layout to its end
   in the background, snaps the result to free cells (busiest nodes first) and glides everything there;
   newcomers take the nearest free cell.
 * **Alike nodes stand together**: every node gets a type from its traces: language and framework

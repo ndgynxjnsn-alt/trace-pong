@@ -104,12 +104,15 @@ export class Overlay {
         let label = scene.labelOf(n);
         const max = big ? 60 : n.level === 'user' ? 20 : 28;
         if (label.length > max) label = `${label.slice(0, max - 1)}…`;
-        const size = small ? Math.max(9, Math.min(12, 10.5 * Math.sqrt(z))) : Math.max(10, Math.min(14, 12 * Math.sqrt(z)));
-        c.font = `${big ? 700 : small ? 500 : 600} ${size}px ${n.level === 'user' && !scene.mode.userNames ? MONO : SANS}`;
+        const cloud = n.kind === 'cloud';
+        const size = cloud ? Math.max(14, Math.min(24, 20 * Math.sqrt(z)))
+          : small ? Math.max(9, Math.min(12, 10.5 * Math.sqrt(z))) : Math.max(10, Math.min(14, 12 * Math.sqrt(z)));
+        c.font = `${big || cloud ? 700 : small ? 500 : 600} ${size}px ${n.level === 'user' && !scene.mode.userNames ? MONO : SANS}`;
         // users stand in a column: their label goes to the left (like Logstalgia's IPs), others below
         const side = n.kind === 'user';
         const lx = side ? x - r - 6 - c.measureText(label).width / 2 : x;
-        const ly = side ? y : y + r + (small ? 12 : 21 * Math.min(1, z + 0.3));
+        // the cloud is flattened (its visible edge is ~0.6 r below the centre): label right under it
+        const ly = side ? y : cloud ? y + r * 0.6 + size * 0.6 : y + r + (small ? 12 : 21 * Math.min(1, z + 0.3));
         const w = c.measureText(label).width / 2 + 3;
         if (big || free(lx - w, ly - size / 2 - 1, lx + w, ly + size / 2 + 1)) {
           placed.push([lx - w, ly - size / 2 - 1, lx + w, ly + size / 2 + 1]);

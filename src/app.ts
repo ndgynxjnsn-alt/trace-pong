@@ -371,7 +371,7 @@ class TracePong {
     const scene = this.scene;
     const s = scene.out;
     return gpu.render({
-      cam: this.cam, dpr: this.dpr * this.renderScale, time: scene.time, dt: scene.paused ? 0 : dt, dim: 0, cell: scene.cellSize,
+      cam: this.cam, dpr: this.dpr * this.renderScale, time: scene.time, dt: scene.paused ? 0 : dt, dim: 0,
       nodes: s.nodes.data, nodeCount: s.nodes.count,
       edges: s.edges.data, edgeCount: s.edges.count,
       under: s.under.data, underCount: s.under.count,
